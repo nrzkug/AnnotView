@@ -33,6 +33,10 @@ brew install mupdf
 
 AnnotView looks for `mutool` in `MUTOOL_PATH`, the app bundle, common Homebrew locations, and `PATH`.
 
+## Install a release
+
+Download the macOS ZIP from Releases, unzip it, and move `AnnotView.app` to Applications. The app is ad-hoc signed, so macOS may block its first launch. Control-click the app and choose **Open**, or allow it in **System Settings → Privacy & Security**.
+
 ## Run and build
 
 Run from source:
