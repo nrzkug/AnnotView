@@ -1,0 +1,27 @@
+# macOS
+.DS_Store
+
+# Swift Package Manager and Xcode
+.build/
+.swiftpm/
+DerivedData/
+*.xcuserstate
+xcuserdata/
+
+# Generated artifacts
+/AppBundle/AnnotView.icns
+/dist/
+/output/
+/tmp/
+
+# Private test fixtures
+/Tests/
+/test-data/private/
+
+# Local environment and signing files
+.env
+.env.*
+!.env.example
+*.p12
+*.cer
+*.provisionprofile

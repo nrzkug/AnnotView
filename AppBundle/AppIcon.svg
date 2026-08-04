@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <title>AnnotView</title>
+  <desc>A flat macOS app icon showing an annotated paper.</desc>
+
+  <defs>
+    <filter id="paper-shadow" x="-20%" y="-20%" width="140%" height="150%">
+      <feDropShadow dx="0" dy="18" stdDeviation="18" flood-color="#17316D" flood-opacity="0.22"/>
+    </filter>
+  </defs>
+
+  <!-- Transparent canvas with a flat blue tile. -->
+  <rect x="64" y="64" width="896" height="896" rx="216" fill="#3C69DD"/>
+
+  <!-- A restrained two-page stack, slightly inset within the full-size blue tile. -->
+  <g transform="translate(512 512) scale(0.94) translate(-512 -512)">
+    <g transform="translate(36 -12)">
+    <rect x="152" y="220" width="500" height="636" rx="56" fill="#C9D7FA"/>
+    <path
+      d="M284 168H624L780 324V800C780 831 755 856 724 856H284C253 856 228 831 228 800V224C228 193 253 168 284 168Z"
+      fill="#FFFFFF"
+      filter="url(#paper-shadow)"
+    />
+
+    <!-- Folded paper corner. -->
+    <path
+      d="M624 168V268C624 299 649 324 680 324H780L624 168Z"
+      fill="#DCE6FF"
+    />
+
+    <!-- Document text and annotation highlight. -->
+    <g fill="#283650">
+      <rect x="326" y="340" width="228" height="24" rx="12"/>
+      <rect x="326" y="396" width="356" height="24" rx="12"/>
+    </g>
+
+    <rect x="306" y="468" width="396" height="112" rx="28" fill="#FFD66B"/>
+    <g fill="#614B20">
+      <rect x="326" y="496" width="332" height="22" rx="11"/>
+      <rect x="326" y="538" width="278" height="22" rx="11"/>
+    </g>
+
+    <g fill="#283650">
+      <rect x="326" y="636" width="286" height="24" rx="12"/>
+      <rect x="326" y="692" width="222" height="24" rx="12"/>
+    </g>
+
+    <!-- Compact comment marker. -->
+    <path
+      d="M716 674C763 674 800 708 800 750C800 793 763 826 716 826C706 826 696 825 687 822L654 846L660 806C642 791 632 772 632 750C632 708 669 674 716 674Z"
+      fill="#FF665E"
+    />
+    </g>
+  </g>
+</svg>
