@@ -1,25 +1,6 @@
 // swift-tools-version: 6.2
 
 import PackageDescription
-import Foundation
-
-var targets: [Target] = [
-    .executableTarget(
-        name: "AnnotView",
-        path: "Sources/AnnotView",
-        resources: [.process("Resources")]
-    )
-]
-
-if FileManager.default.fileExists(atPath: "Tests/AnnotViewTests") {
-    targets.append(
-        .testTarget(
-            name: "AnnotViewTests",
-            dependencies: ["AnnotView"],
-            path: "Tests/AnnotViewTests"
-        )
-    )
-}
 
 let package = Package(
     name: "AnnotView",
@@ -27,5 +8,16 @@ let package = Package(
     products: [
         .executable(name: "AnnotView", targets: ["AnnotView"])
     ],
-    targets: targets
+    targets: [
+        .executableTarget(
+            name: "AnnotView",
+            path: "Sources/AnnotView",
+            resources: [.process("Resources")]
+        ),
+        .testTarget(
+            name: "AnnotViewTests",
+            dependencies: ["AnnotView"],
+            path: "Tests/AnnotViewTests"
+        )
+    ]
 )

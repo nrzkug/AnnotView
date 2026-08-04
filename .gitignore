@@ -15,7 +15,6 @@ xcuserdata/
 /tmp/
 
 # Private test fixtures
-/Tests/
 /test-data/private/
 
 # Local environment and signing files
