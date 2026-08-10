@@ -75,10 +75,24 @@ The `annotview-pdf-annotations` agent skill (in `skills/`) teaches AI agents to 
    cp -R skills/annotview-pdf-annotations ~/.pi/agent/skills/
    ```
 
-2. Install with the GitHub CLI:
+2. Install with the GitHub CLI. `gh skill` is available in gh 2.97.0+ (preview, subject to change):
 
    ```sh
-   gh skill install <owner>/<repo>
+   gh skill install nrzkug/AnnotView annotview-pdf-annotations --agent pi --scope user
+   ```
+
+   Breakdown of the arguments:
+
+   - `nrzkug/AnnotView` — this repository, in `OWNER/REPO` form (fork owners substitute their own).
+   - `annotview-pdf-annotations` — the skill name; gh auto-discovers skills under `skills/*/SKILL.md`.
+   - `--agent pi` — install for the pi coding agent. Without it, gh defaults to `github-copilot` when run non-interactively.
+   - `--scope user` — install into your home directory so it is available everywhere; the default scope is `project` (scoped to the current git repository).
+
+   Verify the install, then update it later:
+
+   ```sh
+   gh skill list --agent pi --scope user
+   gh skill update --all
    ```
 
 ## License
