@@ -30,6 +30,7 @@ struct AnnotationPresentationPolicyTests {
             action(for: annotation, request: .hover, context: .transientPreview)
                 == .preview(pinned: false)
         )
+        #expect(action(for: annotation, request: .hover) == .preview(pinned: false))
     }
 
     private func action(

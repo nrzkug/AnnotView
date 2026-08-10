@@ -44,13 +44,24 @@ Run from source:
 swift run AnnotView
 ```
 
-Build the release executable:
+Build, package, sign, and install a fresh copy of the app from one command:
+
+```sh
+./Scripts/package.sh          # build → stage in dist/ → install to /Applications → launch
+./Scripts/package.sh --stage  # build and stage only, no install
+```
+
+The script is the single packaging entry point. It assembles the `.app` from the
+release binary, `AppBundle/Info.plist` + icon, the SwiftPM resource bundle (which
+carries the MuPDF JS scripts from `Sources/AnnotView/Resources/MuPDF/`), and the
+`annotool` CLI, then ad-hoc signs and launches it. It fails loudly if the bundled
+JS ever drifts from the sources.
+
+For a plain executable build without packaging:
 
 ```sh
 swift build -c release --product AnnotView
 ```
-
-Use `swift build -c release --show-bin-path` to locate the executable.
 
 ## annotool CLI and AI skill
 

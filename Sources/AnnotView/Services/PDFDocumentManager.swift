@@ -212,6 +212,16 @@ final class PDFDocumentManager: ObservableObject {
         }
         isSavingAnnotation = true
         defer { isSavingAnnotation = false }
+        // Optimistically move the in-memory annotation so the overlay does not
+        // snap back to the old position while the PDF is being rewritten.
+        if let index = annotations.firstIndex(where: { $0.id == annotation.id }) {
+            var moved = annotations[index]
+            moved.bounds = bounds
+            annotations[index] = moved
+            if focusedAnnotation?.id == annotation.id {
+                focusedAnnotation = moved
+            }
+        }
         do {
             try await annotationWriter.move(
                 in: documentURL,

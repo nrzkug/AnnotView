@@ -162,7 +162,11 @@ final class AnnotationPopoverCoordinator: NSObject, NSPopoverDelegate {
 
     private func makePopover<Content: View>(size: NSSize, rootView: Content) -> NSPopover {
         let popover = NSPopover()
-        popover.behavior = .transient
+        // semitransient: clicking inside the PDF window does not auto-close the
+        // popover, so a hover preview can be upgraded to the pinned preview in
+        // place instead of racing a closing popover (which broke click-to-select
+        // and note dragging while a preview was showing).
+        popover.behavior = .semitransient
         popover.animates = true
         popover.delegate = self
         popover.contentSize = size
@@ -185,6 +189,7 @@ final class AnnotationPopoverCoordinator: NSObject, NSPopoverDelegate {
         popover = newPopover
         activePopover = state
     }
+
 
     func dismiss() {
         hoverDismissTask?.cancel()

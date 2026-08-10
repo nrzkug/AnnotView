@@ -133,13 +133,9 @@ final class AnnotationPDFView: PDFView, @preconcurrency PDFPageOverlayViewProvid
             suppressesMarkupOnMouseUp = true
             onSelectAnnotationRequest?(target.annotation.id)
             interactionController.cancelPendingHoverPresentation()
-            // A hover preview may still be open or mid-close; dismiss it
-            // synchronously so pressing an annotation starts from a clean state
-            // (the preview re-appears pinned on mouseUp for notes/carets).
-            popoverCoordinator.dismiss()
             if target.annotation.kind == .note || target.annotation.kind == .caret {
-                // Sticky notes and carets are position-based: start a drag and
-                // present the popup on mouseUp only if the note was not moved.
+                // Position-based annotations: wait for mouseUp to tell a click
+                // from a drag, then pin the preview or move the annotation.
                 dragState = (
                     annotation: target.annotation,
                     page: target.page,
@@ -148,6 +144,9 @@ final class AnnotationPDFView: PDFView, @preconcurrency PDFPageOverlayViewProvid
                 )
                 return
             }
+            // Markup kinds pin the preview on press. The hover preview is
+            // semitransient, so it is still open here and gets upgraded in
+            // place rather than racing a closing popover.
             handleAnnotationPresentation(target.annotation, on: target.page, request: .documentClick)
             return
         }
@@ -177,6 +176,8 @@ final class AnnotationPDFView: PDFView, @preconcurrency PDFPageOverlayViewProvid
 
     override func mouseDragged(with event: NSEvent) {
         if dragState != nil {
+            // Dragging has begun: drop the pinned preview and move the note.
+            popoverCoordinator.dismiss()
             updateDrag(to: convert(event.locationInWindow, from: nil))
         } else {
             super.mouseDragged(with: event)
@@ -191,8 +192,10 @@ final class AnnotationPDFView: PDFView, @preconcurrency PDFPageOverlayViewProvid
             let startPagePoint = convert(drag.startViewPoint, to: drag.page)
             let moved = hypot(pagePoint.x - startPagePoint.x, pagePoint.y - startPagePoint.y)
             if moved < 3 {
+                // A click: pin the (still-open, semitransient) hover preview.
                 handleAnnotationPresentation(drag.annotation, on: drag.page, request: .documentClick)
             } else if let onMoveAnnotationRequest {
+                popoverCoordinator.dismiss()
                 onMoveAnnotationRequest(drag.annotation, drag.annotation.bounds)
             }
             return
