@@ -27,6 +27,7 @@ final class AnnotationPopoverCoordinator: NSObject, NSPopoverDelegate {
     private var popover: NSPopover?
     private var activePopover: ActivePopover?
     private var pendingShow: PendingShow?
+    private var isClosing = false
     private var hoverDismissTask: Task<Void, Never>?
 
     private struct PendingShow {
@@ -42,6 +43,11 @@ final class AnnotationPopoverCoordinator: NSObject, NSPopoverDelegate {
 
     var policyContext: AnnotationPresentationContext {
         activePopover?.policyContext ?? .none
+    }
+
+    /// The annotation the current presentation (if any) belongs to.
+    var presentedAnnotationID: UUID? {
+        activePopover?.annotationID
     }
 
     func handle(
@@ -82,16 +88,14 @@ final class AnnotationPopoverCoordinator: NSObject, NSPopoverDelegate {
 
     func popoverDidClose(_ notification: Notification) {
         guard let closedPopover = notification.object as? NSPopover else { return }
-        // The coordinator only tracks one popover at a time; a close for the
-        // shown popover (user dismissed it) or for one we closed to defer a
-        // replacement both free the slot.
+        isClosing = false
         if closedPopover === popover { popover = nil }
         activePopover = nil
         hoverDismissTask?.cancel()
         // A popover can only be shown once its predecessor has fully closed:
         // showing a second popover on the same positioning view while the first
         // is still closing silently fails (NSPopover race). Flush the queued
-        // replacement now that the close animation is done.
+        // replacement now that the close is done.
         if let pending = pendingShow {
             pendingShow = nil
             showPopover(pending.popover, state: pending.state, annotation: pending.annotation, page: pending.page)
@@ -111,26 +115,37 @@ final class AnnotationPopoverCoordinator: NSObject, NSPopoverDelegate {
         }
 
         let presentationID = UUID()
-        let height = Self.previewHeight(for: annotation)
-        let popover = makePopover(
-            size: NSSize(width: 330, height: height),
-            rootView: AnnotationPopoverView(
-                annotation: annotation,
-                height: height,
-                onEdit: { [weak self, weak page] in
-                    guard let self, let page,
-                          self.activePopover?.presentationID == presentationID else { return }
-                    self.handle(annotation, on: page, request: .explicitEdit)
-                }
-            )
+        let state = ActivePopover(
+            annotationID: annotation.id,
+            presentationID: presentationID,
+            kind: .preview(pinned: pinned)
         )
+        let height = Self.previewHeight(for: annotation)
+        let size = NSSize(width: 330, height: height)
+        let rootView = AnnotationPopoverView(
+            annotation: annotation,
+            height: height,
+            onEdit: { [weak self, weak page] in
+                guard let self, let page,
+                      self.activePopover?.presentationID == presentationID else { return }
+                self.handle(annotation, on: page, request: .explicitEdit)
+            }
+        )
+        if popover?.isShown == true, !isClosing {
+            // Swap content in place: repositioning the same popover avoids the
+            // close-then-show race when hopping between annotations.
+            retargetPopover(
+                state: state,
+                annotation: annotation,
+                page: page,
+                size: size,
+                rootView: rootView
+            )
+            return
+        }
         install(
-            popover,
-            state: ActivePopover(
-                annotationID: annotation.id,
-                presentationID: presentationID,
-                kind: .preview(pinned: pinned)
-            ),
+            makePopover(size: size, rootView: rootView),
+            state: state,
             annotation: annotation,
             page: page
         )
@@ -144,34 +159,43 @@ final class AnnotationPopoverCoordinator: NSObject, NSPopoverDelegate {
         }
 
         let presentationID = UUID()
-        let popover = makePopover(
-            size: NSSize(width: 360, height: 286),
-            rootView: AnnotationEditorView(
-                annotation: annotation,
-                onSave: { [weak self] contents, color in
-                    guard let self, let update = self.hostView?.onUpdateAnnotation else { return false }
-                    let saved = await update(annotation, contents, color)
-                    if saved { self.dismiss(presentationID: presentationID) }
-                    return saved
-                },
-                onDelete: { [weak self] in
-                    guard let self, let delete = self.hostView?.onDeleteAnnotation else { return false }
-                    let deleted = await delete(annotation)
-                    if deleted { self.dismiss(presentationID: presentationID) }
-                    return deleted
-                },
-                onCancel: { [weak self] in
-                    self?.dismiss(presentationID: presentationID)
-                }
-            )
+        let state = ActivePopover(
+            annotationID: annotation.id,
+            presentationID: presentationID,
+            kind: .editor
         )
+        let size = NSSize(width: 360, height: 286)
+        let rootView = AnnotationEditorView(
+            annotation: annotation,
+            onSave: { [weak self] contents, color in
+                guard let self, let update = self.hostView?.onUpdateAnnotation else { return false }
+                let saved = await update(annotation, contents, color)
+                if saved { self.dismiss(presentationID: presentationID) }
+                return saved
+            },
+            onDelete: { [weak self] in
+                guard let self, let delete = self.hostView?.onDeleteAnnotation else { return false }
+                let deleted = await delete(annotation)
+                if deleted { self.dismiss(presentationID: presentationID) }
+                return deleted
+            },
+            onCancel: { [weak self] in
+                self?.dismiss(presentationID: presentationID)
+            }
+        )
+        if popover?.isShown == true, !isClosing {
+            retargetPopover(
+                state: state,
+                annotation: annotation,
+                page: page,
+                size: size,
+                rootView: rootView
+            )
+            return
+        }
         install(
-            popover,
-            state: ActivePopover(
-                annotationID: annotation.id,
-                presentationID: presentationID,
-                kind: .editor
-            ),
+            makePopover(size: size, rootView: rootView),
+            state: state,
             annotation: annotation,
             page: page
         )
@@ -191,6 +215,25 @@ final class AnnotationPopoverCoordinator: NSObject, NSPopoverDelegate {
         return popover
     }
 
+    private func retargetPopover<Content: View>(
+        state: ActivePopover,
+        annotation: Annotation,
+        page: PDFPage,
+        size: NSSize,
+        rootView: Content
+    ) {
+        guard let hostView, let popover else { return }
+        hoverDismissTask?.cancel()
+        popover.contentViewController = NSHostingController(rootView: rootView)
+        popover.contentSize = size
+        let anchor = hostView.convert(AnnotationOverlayRenderer.anchorBounds(for: annotation), from: page)
+        popover.show(relativeTo: anchor, of: hostView, preferredEdge: .maxX)
+        self.activePopover = state
+        if case .preview(pinned: false) = state.kind {
+            monitorHoverPreview(for: state.annotationID)
+        }
+    }
+
     private func install(
         _ newPopover: NSPopover,
         state: ActivePopover,
@@ -200,7 +243,7 @@ final class AnnotationPopoverCoordinator: NSObject, NSPopoverDelegate {
         guard let hostView else { return }
         if popover?.isShown == true || pendingShow != nil {
             // A popover is shown or already closing; queue the replacement and
-            // let popoverDidClose show it once the close animation completes.
+            // let popoverDidClose show it once the close completes.
             pendingShow = PendingShow(
                 popover: newPopover,
                 state: state,
@@ -241,6 +284,7 @@ final class AnnotationPopoverCoordinator: NSObject, NSPopoverDelegate {
         let closingPopover = popover
         popover = nil
         activePopover = nil
+        if closingPopover != nil { isClosing = true }
         closingPopover?.close()
     }
 

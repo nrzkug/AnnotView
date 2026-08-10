@@ -115,6 +115,7 @@ final class AnnotationPDFView: PDFView, @preconcurrency PDFPageOverlayViewProvid
             annotation: target?.annotation,
             page: target?.page,
             presentationContext: popoverCoordinator.policyContext,
+            presentedAnnotationID: popoverCoordinator.presentedAnnotationID,
             present: { [weak self] annotation, page in
                 self?.handleAnnotationPresentation(annotation, on: page, request: .hover)
             }

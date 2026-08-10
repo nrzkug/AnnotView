@@ -32,18 +32,37 @@ final class AnnotationInteractionController {
         annotation: Annotation?,
         page: PDFPage?,
         presentationContext: AnnotationPresentationContext,
+        presentedAnnotationID: UUID?,
         present: @escaping @MainActor (Annotation, PDFPage) -> Void
     ) {
-        guard annotation?.id != hoveredAnnotationID else { return }
-        hoverPresentationTask?.cancel()
-        hoveredAnnotationID = annotation?.id
-        guard let annotation, let page,
-              AnnotationPresentationPolicy.action(
-                  for: annotation,
-                  request: .hover,
-                  context: presentationContext
-              ) != .ignore else { return }
+        guard let annotation, let page else {
+            clearHover()
+            return
+        }
+        // A preview/pinned/editor is already on screen for this annotation:
+        // keep it without scheduling a duplicate hover task.
+        if presentationContext != .none, presentedAnnotationID == annotation.id {
+            if hoveredAnnotationID != annotation.id {
+                hoverPresentationTask?.cancel()
+                hoveredAnnotationID = annotation.id
+            }
+            return
+        }
+        // Nothing is presented for this annotation. hoveredAnnotationID can be
+        // stale (a previous preview was dismissed by dragging or by the hover
+        // monitor without a mouse-exit), so also reschedule when the id is
+        // unchanged but the presentation is gone.
+        if hoveredAnnotationID != annotation.id {
+            hoverPresentationTask?.cancel()
+            hoveredAnnotationID = annotation.id
+        }
+        guard AnnotationPresentationPolicy.action(
+            for: annotation,
+            request: .hover,
+            context: presentationContext
+        ) != .ignore else { return }
 
+        hoverPresentationTask?.cancel()
         hoverPresentationTask = Task { @MainActor [weak self, weak page] in
             try? await Task.sleep(for: .milliseconds(200))
             guard !Task.isCancelled,
