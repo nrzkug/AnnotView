@@ -26,7 +26,15 @@ final class AnnotationPopoverCoordinator: NSObject, NSPopoverDelegate {
     private weak var hostView: AnnotationPDFView?
     private var popover: NSPopover?
     private var activePopover: ActivePopover?
+    private var pendingShow: PendingShow?
     private var hoverDismissTask: Task<Void, Never>?
+
+    private struct PendingShow {
+        let popover: NSPopover
+        let state: ActivePopover
+        let annotation: Annotation
+        let page: PDFPage
+    }
 
     init(hostView: AnnotationPDFView) {
         self.hostView = hostView
@@ -73,11 +81,21 @@ final class AnnotationPopoverCoordinator: NSObject, NSPopoverDelegate {
     }
 
     func popoverDidClose(_ notification: Notification) {
-        guard let closedPopover = notification.object as? NSPopover,
-              closedPopover === popover else { return }
-        popover = nil
+        guard let closedPopover = notification.object as? NSPopover else { return }
+        // The coordinator only tracks one popover at a time; a close for the
+        // shown popover (user dismissed it) or for one we closed to defer a
+        // replacement both free the slot.
+        if closedPopover === popover { popover = nil }
         activePopover = nil
         hoverDismissTask?.cancel()
+        // A popover can only be shown once its predecessor has fully closed:
+        // showing a second popover on the same positioning view while the first
+        // is still closing silently fails (NSPopover race). Flush the queued
+        // replacement now that the close animation is done.
+        if let pending = pendingShow {
+            pendingShow = nil
+            showPopover(pending.popover, state: pending.state, annotation: pending.annotation, page: pending.page)
+        }
     }
 
     private func showPreview(_ annotation: Annotation, on page: PDFPage, pinned: Bool) {
@@ -116,7 +134,6 @@ final class AnnotationPopoverCoordinator: NSObject, NSPopoverDelegate {
             annotation: annotation,
             page: page
         )
-        if !pinned { monitorHoverPreview(for: annotation.id) }
     }
 
     private func showEditor(_ annotation: Annotation, on page: PDFPage) {
@@ -181,17 +198,44 @@ final class AnnotationPopoverCoordinator: NSObject, NSPopoverDelegate {
         page: PDFPage
     ) {
         guard let hostView else { return }
-        hoverDismissTask?.cancel()
-        hostView.cancelPendingHoverPresentation()
-        dismiss()
+        if popover?.isShown == true || pendingShow != nil {
+            // A popover is shown or already closing; queue the replacement and
+            // let popoverDidClose show it once the close animation completes.
+            pendingShow = PendingShow(
+                popover: newPopover,
+                state: state,
+                annotation: annotation,
+                page: page
+            )
+            closeCurrentPopover()
+        } else {
+            showPopover(newPopover, state: state, annotation: annotation, page: page)
+        }
+    }
+
+    private func showPopover(
+        _ newPopover: NSPopover,
+        state: ActivePopover,
+        annotation: Annotation,
+        page: PDFPage
+    ) {
+        guard let hostView else { return }
         let anchor = hostView.convert(AnnotationOverlayRenderer.anchorBounds(for: annotation), from: page)
         newPopover.show(relativeTo: anchor, of: hostView, preferredEdge: .maxX)
         popover = newPopover
         activePopover = state
+        if case .preview(pinned: false) = state.kind {
+            monitorHoverPreview(for: state.annotationID)
+        }
     }
 
-
     func dismiss() {
+        // Dismissing from the outside cancels any deferred replacement.
+        pendingShow = nil
+        closeCurrentPopover()
+    }
+
+    private func closeCurrentPopover() {
         hoverDismissTask?.cancel()
         hostView?.cancelPendingHoverPresentation()
         let closingPopover = popover
