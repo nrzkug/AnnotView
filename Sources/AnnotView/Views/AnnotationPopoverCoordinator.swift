@@ -98,6 +98,16 @@ final class AnnotationPopoverCoordinator: NSObject, NSPopoverDelegate {
         // replacement now that the close is done.
         if let pending = pendingShow {
             pendingShow = nil
+            if case .preview(pinned: false) = pending.state.kind,
+               hostView?.mouseIsInsideAnnotation(
+                   pending.state.annotationID,
+                   at: NSEvent.mouseLocation
+               ) != true {
+                // The mouse left the target while the old popover was closing;
+                // don't show a ghost preview. The hover pipeline re-triggers if
+                // the user comes back.
+                return
+            }
             showPopover(pending.popover, state: pending.state, annotation: pending.annotation, page: pending.page)
         }
     }
@@ -131,18 +141,6 @@ final class AnnotationPopoverCoordinator: NSObject, NSPopoverDelegate {
                 self.handle(annotation, on: page, request: .explicitEdit)
             }
         )
-        if popover?.isShown == true, !isClosing {
-            // Swap content in place: repositioning the same popover avoids the
-            // close-then-show race when hopping between annotations.
-            retargetPopover(
-                state: state,
-                annotation: annotation,
-                page: page,
-                size: size,
-                rootView: rootView
-            )
-            return
-        }
         install(
             makePopover(size: size, rootView: rootView),
             state: state,
@@ -183,16 +181,6 @@ final class AnnotationPopoverCoordinator: NSObject, NSPopoverDelegate {
                 self?.dismiss(presentationID: presentationID)
             }
         )
-        if popover?.isShown == true, !isClosing {
-            retargetPopover(
-                state: state,
-                annotation: annotation,
-                page: page,
-                size: size,
-                rootView: rootView
-            )
-            return
-        }
         install(
             makePopover(size: size, rootView: rootView),
             state: state,
@@ -215,25 +203,6 @@ final class AnnotationPopoverCoordinator: NSObject, NSPopoverDelegate {
         return popover
     }
 
-    private func retargetPopover<Content: View>(
-        state: ActivePopover,
-        annotation: Annotation,
-        page: PDFPage,
-        size: NSSize,
-        rootView: Content
-    ) {
-        guard let hostView, let popover else { return }
-        hoverDismissTask?.cancel()
-        popover.contentViewController = NSHostingController(rootView: rootView)
-        popover.contentSize = size
-        let anchor = hostView.convert(AnnotationOverlayRenderer.anchorBounds(for: annotation), from: page)
-        popover.show(relativeTo: anchor, of: hostView, preferredEdge: .maxX)
-        self.activePopover = state
-        if case .preview(pinned: false) = state.kind {
-            monitorHoverPreview(for: state.annotationID)
-        }
-    }
-
     private func install(
         _ newPopover: NSPopover,
         state: ActivePopover,
@@ -243,7 +212,7 @@ final class AnnotationPopoverCoordinator: NSObject, NSPopoverDelegate {
         guard let hostView else { return }
         if popover?.isShown == true || pendingShow != nil {
             // A popover is shown or already closing; queue the replacement and
-            // let popoverDidClose show it once the close completes.
+            // let popoverDidClose show it once the close animation completes.
             pendingShow = PendingShow(
                 popover: newPopover,
                 state: state,
