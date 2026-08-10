@@ -12,17 +12,16 @@ Built with SwiftUI, AppKit, and PDFKit, AnnotView focuses on reading papers and 
 
 ## Features
 
-- Renders highlights, underlines, strikeouts, and text notes.
+- Renders highlights, underlines, strikeouts, text notes, and Insert-Text carets.
 - Shows annotation authors, dates, comments, replies, and colors.
+- Creates and edits Acrobat-compatible highlights, underlines, strikethroughs, sticky notes, and insert-text markers.
 - Supports Acrobat review states: Accepted, Rejected, Cancelled, and Completed.
 - Provides comment copying, annotation navigation, and document search.
-
-Ink annotations can be parsed but are not yet rendered.
+- Ships an `annotool` CLI for reading and writing Acrobat annotations from a terminal or AI agent.
 
 ## Requirements
 
 - macOS 26 or later
-- Xcode with the macOS 26 SDK or later
 - MuPDF `mutool`
 
 Install MuPDF with Homebrew:
@@ -52,6 +51,24 @@ swift build -c release --product AnnotView
 ```
 
 Use `swift build -c release --show-bin-path` to locate the executable.
+
+## annotool CLI and AI skill
+
+`annotool` reads and writes Acrobat annotations from the command line (install it from **Settings → Command Line Tool**).
+
+The `annotview-pdf-annotations` agent skill (in `skills/`) teaches AI agents to use it. Install the skill one of two ways:
+
+1. Copy the skill folder into your agent's skill directory:
+
+   ```sh
+   cp -R skills/annotview-pdf-annotations ~/.pi/agent/skills/
+   ```
+
+2. Install with the GitHub CLI:
+
+   ```sh
+   gh skill install <owner>/<repo>
+   ```
 
 ## License
 

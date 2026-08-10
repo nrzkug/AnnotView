@@ -63,6 +63,8 @@ enum AnnotationOverlayRenderer {
                 drawNote(annotation, color: color, context: context)
             case .ink:
                 break
+            case .caret:
+                drawCaret(annotation, color: color, context: context)
             }
             context.restoreGState()
         }
@@ -82,6 +84,45 @@ enum AnnotationOverlayRenderer {
                 CGPath(roundedRect: outline, cornerWidth: 2.5, cornerHeight: 2.5, transform: nil)
             )
             context.strokePath()
+        } else if annotation.kind == .caret {
+            let outline = caretMarkerRect(for: annotation).insetBy(dx: -2, dy: -2)
+            context.addPath(
+                CGPath(roundedRect: outline, cornerWidth: 2.5, cornerHeight: 2.5, transform: nil)
+            )
+            context.strokePath()
+        } else {
+            for quad in quadrilaterals(from: annotation) {
+                let quadPath = path(for: quad)
+                context.addPath(quadPath)
+                context.drawPath(using: .fillStroke)
+            }
+        }
+        context.restoreGState()
+    }
+
+    /// Persistent emphasis for the annotation selected from the sidebar or by
+    /// clicking it in the document. Stronger than hover so it reads as a
+    /// selection rather than a transient highlight.
+    static func drawSelection(for annotation: Annotation, context: CGContext) {
+        context.saveGState()
+        let accent = NSColor.controlAccentColor
+        context.setStrokeColor(accent.withAlphaComponent(1).cgColor)
+        context.setFillColor(accent.withAlphaComponent(0.16).cgColor)
+        context.setLineWidth(1.2)
+        context.setLineJoin(.round)
+
+        if annotation.kind == .note {
+            let outline = noteIconRect(for: annotation).insetBy(dx: -2, dy: -2)
+            context.addPath(
+                CGPath(roundedRect: outline, cornerWidth: 3, cornerHeight: 3, transform: nil)
+            )
+            context.drawPath(using: .fillStroke)
+        } else if annotation.kind == .caret {
+            let outline = caretMarkerRect(for: annotation).insetBy(dx: -2.5, dy: -2.5)
+            context.addPath(
+                CGPath(roundedRect: outline, cornerWidth: 3, cornerHeight: 3, transform: nil)
+            )
+            context.drawPath(using: .fillStroke)
         } else {
             for quad in quadrilaterals(from: annotation) {
                 let quadPath = path(for: quad)
@@ -162,6 +203,9 @@ enum AnnotationOverlayRenderer {
         if annotation.kind == .note {
             return noteIconRect(for: annotation).insetBy(dx: -3, dy: -3).contains(point)
         }
+        if annotation.kind == .caret {
+            return caretMarkerRect(for: annotation).insetBy(dx: -3, dy: -3).contains(point)
+        }
         return quadrilaterals(from: annotation).contains { quad in
             path(for: quad).boundingBox.insetBy(dx: -2, dy: -2).contains(point)
         }
@@ -212,6 +256,55 @@ enum AnnotationOverlayRenderer {
             context.move(to: CGPoint(x: iconRect.minX + 2.2, y: y))
             context.addLine(to: CGPoint(x: iconRect.maxX - 2.2, y: y))
         }
+        context.strokePath()
+    }
+
+    /// Acrobat's caret glyph: a leaf drawn with two cubic Beziers, 7.6454 wide
+    /// by 6.007 tall, its base 0.6pt above the rect's bottom edge, centered
+    /// horizontally. The same path Acrobat writes into the /AP appearance.
+    static func caretMarkerRect(for annotation: Annotation) -> CGRect {
+        let width: CGFloat = 7.6454
+        let height: CGFloat = 6.007
+        return CGRect(
+            x: annotation.bounds.midX - width / 2,
+            y: annotation.bounds.minY + 0.600708,
+            width: width,
+            height: height
+        )
+    }
+
+    private static func drawCaret(
+        _ annotation: Annotation,
+        color: CGColor,
+        context: CGContext
+    ) {
+        let rect = caretMarkerRect(for: annotation)
+        let ink = color.copy(alpha: 1) ?? color
+        let midX = rect.midX
+        let base = rect.minY
+        let apex = rect.maxY
+        let shoulderY = base + 3.0035
+
+        let leaf = CGMutablePath()
+        leaf.move(to: CGPoint(x: rect.minX, y: base))
+        leaf.addCurve(
+            to: CGPoint(x: midX, y: apex),
+            control1: CGPoint(x: midX, y: base),
+            control2: CGPoint(x: midX, y: shoulderY)
+        )
+        leaf.addCurve(
+            to: CGPoint(x: rect.maxX, y: base),
+            control1: CGPoint(x: midX, y: shoulderY),
+            control2: CGPoint(x: midX, y: base)
+        )
+        leaf.closeSubpath()
+
+        context.setFillColor(ink)
+        context.addPath(leaf)
+        context.fillPath()
+        context.setStrokeColor(ink)
+        context.setLineWidth(0.6007)
+        context.addPath(leaf)
         context.strokePath()
     }
 

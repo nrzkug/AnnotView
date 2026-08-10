@@ -47,7 +47,19 @@ struct MuPDFTool: Sendable {
     }
 
     static func bundledScript(named name: String) -> URL? {
-        Bundle.module.url(forResource: name, withExtension: "js")
+        if let resources = Bundle.main.resourceURL,
+           let packagedBundle = Bundle(
+               url: resources.appendingPathComponent("AnnotView_AnnotView.bundle", isDirectory: true)
+           ),
+           let script = packagedBundle.url(forResource: name, withExtension: "js")
+                ?? packagedBundle.url(
+                    forResource: name,
+                    withExtension: "js",
+                    subdirectory: "MuPDF"
+                ) {
+            return script
+        }
+        return Bundle.module.url(forResource: name, withExtension: "js")
             ?? Bundle.module.url(
                 forResource: name,
                 withExtension: "js",

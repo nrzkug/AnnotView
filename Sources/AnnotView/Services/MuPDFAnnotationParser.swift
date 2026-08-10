@@ -104,9 +104,18 @@ struct MuPDFAnnotationParser: AnnotationParsing {
                 annotation.sourceID.map { ($0, annotation) }
             }
         )
+        // Carets that are the IRT parent of another annotation (Acrobat
+        // replacement edits) are already merged into that annotation's
+        // presentation below; skip the standalone duplicate.
+        let parentSourceIDs = Set(page.annotations.compactMap(\.inReplyToSourceID))
 
         return page.annotations.compactMap { source -> Annotation? in
             guard let kind = mapKind(source.type) else { return nil }
+            if source.type.caseInsensitiveCompare("Caret") == .orderedSame,
+               let sourceID = source.sourceID,
+               parentSourceIDs.contains(sourceID) {
+                return nil
+            }
             let acrobatChangeParent = source.inReplyToSourceID
                 .flatMap { annotationsByID[$0] }
                 .flatMap { $0.type.caseInsensitiveCompare("Caret") == .orderedSame ? $0 : nil }
@@ -160,6 +169,7 @@ struct MuPDFAnnotationParser: AnnotationParsing {
         case "strikeout": .strikeout
         case "text": .note
         case "ink": .ink
+        case "caret": .caret
         default: nil
         }
     }

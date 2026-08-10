@@ -13,6 +13,7 @@ struct ContentView: View {
     @EnvironmentObject private var chromeState: ReaderChromeState
     @EnvironmentObject private var searchController: PDFSearchController
     @State private var annotationStatusFilter: Annotation.Status?
+    @State private var annotationTool: AnnotationTool = .selection
     @FocusState private var searchFieldIsFocused: Bool
 
     private enum ColumnWidth {
@@ -65,6 +66,20 @@ struct ContentView: View {
         }
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
+                annotationToolControl
+            }
+
+            if documentManager.isSavingAnnotation {
+                ToolbarItem(placement: .primaryAction) {
+                    ProgressView()
+                        .controlSize(.small)
+                        .help("Saving annotation to the PDF")
+                }
+            }
+
+            ToolbarSpacer(.fixed, placement: .primaryAction)
+
+            ToolbarItem(placement: .primaryAction) {
                 Button {
                     chromeState.inspectorIsPresented.toggle()
                 } label: {
@@ -88,6 +103,31 @@ struct ContentView: View {
         }
     }
 
+    @ViewBuilder
+    private var annotationToolControl: some View {
+        if #available(macOS 27.0, *) {
+            annotationToolPicker
+                .pickerStyle(.tabs)
+                .labelStyle(.iconOnly)
+                .fixedSize()
+        } else {
+            annotationToolPicker
+                .pickerStyle(.segmented)
+                .labelStyle(.iconOnly)
+                .fixedSize()
+        }
+    }
+
+    private var annotationToolPicker: some View {
+        Picker("Annotation Tool", selection: $annotationTool) {
+            ForEach(AnnotationTool.allCases, id: \.self) { tool in
+                Label(tool.label, systemImage: tool.symbolName)
+                    .help(tool.label)
+                    .tag(tool)
+            }
+        }
+    }
+
     private var sidebar: some View {
         ThumbnailSidebar()
             .navigationSplitViewColumnWidth(
@@ -105,11 +145,41 @@ struct ContentView: View {
                 annotations: documentManager.annotations,
                 focusedAnnotation: documentManager.focusedAnnotation,
                 annotationNavigationID: documentManager.annotationNavigationID,
+                selectedAnnotationID: documentManager.selectedAnnotationID,
+                onSelectAnnotationRequest: { id in
+                    documentManager.selectAnnotation(id)
+                },
+                onDeselectAnnotationRequest: {
+                    documentManager.deselectAnnotation()
+                },
                 searchResults: searchController.results,
                 currentSearchResultIndex: searchController.currentResultIndex,
                 searchNavigationID: searchController.navigationID,
                 zoomAction: documentManager.zoomAction,
                 zoomRequestID: documentManager.zoomRequestID,
+                annotationTool: annotationTool,
+                onCreateMarkupRequest: { kind, selection in
+                    Task { await documentManager.createMarkup(kind: kind, selection: selection) }
+                },
+                onCreateNoteRequest: { location in
+                    Task { await documentManager.createNote(at: location) }
+                },
+                onCreateInsertTextRequest: { location in
+                    Task { await documentManager.createCaret(at: location) }
+                },
+                onUpdateAnnotation: { annotation, contents, color in
+                    await documentManager.updateAnnotation(
+                        annotation,
+                        contents: contents,
+                        color: color
+                    )
+                },
+                onMoveAnnotationRequest: { annotation, rect in
+                    Task { await documentManager.move(annotation, to: rect) }
+                },
+                onDeleteAnnotation: { annotation in
+                    await documentManager.deleteAnnotation(annotation)
+                },
                 selectedPageIndex: $documentManager.selectedPageIndex
             )
             .background(Color(nsColor: .windowBackgroundColor))
@@ -173,6 +243,31 @@ struct ContentView: View {
         .background(.bar)
         .overlay(alignment: .bottom) {
             Divider()
+        }
+    }
+
+}
+
+private extension AnnotationTool {
+    var label: String {
+        switch self {
+        case .selection: "Select"
+        case .highlight: "Highlight"
+        case .underline: "Underline"
+        case .strikeout: "Strikeout"
+        case .note: "Sticky Note"
+        case .insertText: "Insert Text"
+        }
+    }
+
+    var symbolName: String {
+        switch self {
+        case .selection: "cursorarrow"
+        case .highlight: "highlighter"
+        case .underline: "underline"
+        case .strikeout: "strikethrough"
+        case .note: "note.text.badge.plus"
+        case .insertText: "text.cursor"
         }
     }
 }

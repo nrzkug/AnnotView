@@ -4,6 +4,12 @@ import PDFKit
 import Testing
 @testable import AnnotView
 
+private let acceptancePDFPath = ProcessInfo.processInfo.environment["ANNOTVIEW_TEST_PDF"]
+private let acceptanceMutoolIsAvailable = FileManager.default.isExecutableFile(
+    atPath: "/opt/homebrew/bin/mutool"
+) || FileManager.default.isExecutableFile(atPath: "/usr/local/bin/mutool")
+private let acceptanceTestsAreEnabled = acceptancePDFPath != nil && acceptanceMutoolIsAvailable
+
 struct AnnotationOverlayRendererTests {
     @Test func groupsAcrobatQuadPointsInSetsOfFour() {
         let points = (0..<8).map { CGPoint(x: $0, y: $0) }
@@ -118,6 +124,53 @@ struct AnnotationOverlayRendererTests {
         #expect(CGPoint(x: 10, y: 20).applying(transform) == CGPoint(x: 300, y: 50))
         #expect(CGPoint(x: 210, y: 320).applying(transform) == CGPoint(x: -300, y: 450))
     }
+
+    @Test func caretAnnotationDrawsVisibleInk() {
+        let annotation = Annotation(
+            kind: .caret,
+            pageIndex: 0,
+            bounds: CGRect(x: 20, y: 20, width: 9, height: 7),
+            contents: "insert here",
+            color: .init(red: 0.75, green: 0.22, blue: 0.77, alpha: 1)
+        )
+
+        let size = CGSize(width: 64, height: 64)
+        let space = CGColorSpaceCreateDeviceRGB()
+        let context = CGContext(
+            data: nil, width: Int(size.width), height: Int(size.height),
+            bitsPerComponent: 8, bytesPerRow: 0, space: space,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        )!
+        AnnotationOverlayRenderer.draw([annotation], context: context)
+        let image = try! #require(context.makeImage())
+        let data = try! #require(image.dataProvider?.data as Data?)
+        let bytesPerRow = image.bytesPerRow
+
+        var colored = 0
+        for row in 0..<Int(size.height) {
+            for column in 0..<Int(size.width) {
+                let index = row * bytesPerRow + column * 4
+                if data[index + 3] > 0 && (data[index] > 8 || data[index + 1] > 8 || data[index + 2] > 8) {
+                    colored += 1
+                }
+            }
+        }
+        #expect(colored >= 5)
+        #expect(AnnotationOverlayRenderer.contains(CGPoint(x: 22, y: 22), in: annotation))
+
+        // The glyph is an upward-pointing triangle of fixed size: the apex sits
+        // above the baseline, so the pixel at the apex is inked while the pixel
+        // directly above it (inside the rect) stays empty.
+        func isInked(_ column: Int, _ row: Int) -> Bool {
+            let index = row * bytesPerRow + column * 4
+            return data[index + 3] > 0 && (data[index] > 8 || data[index + 1] > 8 || data[index + 2] > 8)
+        }
+        let marker = AnnotationOverlayRenderer.caretMarkerRect(for: annotation)
+        let apexColumn = Int(marker.midX)
+        let apexRow = Int(size.height - marker.maxY)
+        #expect(isInked(apexColumn, apexRow))
+        #expect(!isInked(apexColumn, apexRow - 1))
+    }
 }
 
 struct PDFDocumentManagerTests {
@@ -137,6 +190,7 @@ struct PDFDocumentManagerTests {
         manager.goTo(annotation: annotation)
         #expect(manager.annotationNavigationID == 1)
         #expect(manager.focusedAnnotation?.id == annotation.id)
+        #expect(manager.selectedAnnotationID == annotation.id)
         // The PDF view updates the selected page after completing the single
         // annotation-centered navigation. The manager must not request a
         // separate page jump first.
@@ -147,10 +201,38 @@ struct PDFDocumentManagerTests {
     }
 
     @Test @MainActor
+    func selectionPersistsIndependentlyOfNavigationFeedback() {
+        let manager = PDFDocumentManager()
+        let annotation = Annotation(
+            kind: .highlight,
+            pageIndex: 0,
+            bounds: CGRect(x: 10, y: 20, width: 30, height: 12)
+        )
+        let other = Annotation(
+            kind: .note,
+            pageIndex: 0,
+            bounds: CGRect(x: 10, y: 20, width: 12, height: 12)
+        )
+
+        manager.goTo(annotation: annotation)
+        #expect(manager.selectedAnnotationID == annotation.id)
+
+        // Selecting another annotation replaces the selection.
+        manager.selectAnnotation(other.id)
+        #expect(manager.selectedAnnotationID == other.id)
+
+        // Deselecting clears it without touching navigation feedback.
+        manager.deselectAnnotation()
+        #expect(manager.selectedAnnotationID == nil)
+        #expect(manager.focusedAnnotation?.id == annotation.id)
+    }
+
+    @Test(.enabled(
+        if: acceptanceTestsAreEnabled,
+        "Requires ANNOTVIEW_TEST_PDF and the mutool executable"
+    )) @MainActor
     func opensAndRendersAcceptancePDFWhenProvided() async throws {
-        guard let path = ProcessInfo.processInfo.environment["ANNOTVIEW_TEST_PDF"] else {
-            return
-        }
+        let path = try #require(acceptancePDFPath)
 
         let manager = PDFDocumentManager()
         await manager.open(url: URL(fileURLWithPath: path))
@@ -275,6 +357,72 @@ struct MuPDFAnnotationParserTests {
         #expect(reply.status == .completed)
     }
 
+    @Test func decodesStandaloneCaretAnnotations() throws {
+        let json = #"""
+        {
+          "version": 1,
+          "pages": [{
+            "pageIndex": 0,
+            "pageTransform": [1, 0, 0, -1, 0, 100],
+            "annotations": [{
+              "sourceID": "caret1", "inReplyToSourceID": null,
+              "type": "Caret", "bounds": [472, 722, 481, 729], "quadPoints": [],
+              "contents": "We note that Fashion-MNIST and CIFAR-10 are two of the most popular datasets in the federated learning literature [refs].",
+              "author": "rjin", "subject": "InsertedText",
+              "creationDate": null, "modificationDate": null,
+              "color": [0.75, 0.22, 0.77], "opacity": 1,
+              "stateModel": null, "state": null
+            }]
+          }]
+        }
+        """#
+
+        let annotation = try #require(
+            MuPDFAnnotationParser.decode(Data(json.utf8)).first
+        )
+        #expect(annotation.kind == .caret)
+        #expect(annotation.contents?.hasPrefix("We note that Fashion-MNIST") == true)
+        #expect(annotation.bounds == CGRect(x: 472, y: -629, width: 9, height: 7))
+    }
+
+    @Test func hidesCaretParentsAlreadyMergedIntoTheirStrikeOutChild() throws {
+        let json = #"""
+        {
+          "version": 1,
+          "pages": [{
+            "pageIndex": 0,
+            "pageTransform": [1, 0, 0, -1, 0, 100],
+            "annotations": [
+              {
+                "sourceID": "caret", "inReplyToSourceID": null,
+                "type": "Caret", "bounds": [10, 20, 20, 30], "quadPoints": [],
+                "contents": "bound specified", "author": "rjin", "subject": "InsertedText",
+                "creationDate": null, "modificationDate": null,
+                "color": [0.97, 0.39, 0.39], "opacity": 1,
+                "stateModel": null, "state": null
+              },
+              {
+                "sourceID": "strike", "inReplyToSourceID": "caret",
+                "type": "StrikeOut", "bounds": [10, 20, 30, 30],
+                "quadPoints": [[10, 20, 30, 20, 10, 30, 30, 30]],
+                "contents": null, "author": "rjin", "subject": "Replace",
+                "creationDate": null, "modificationDate": null,
+                "color": [0.9, 0.15, 0.12], "opacity": 1,
+                "stateModel": null, "state": null
+              }
+            ]
+          }]
+        }
+        """#
+
+        let annotations = try MuPDFAnnotationParser.decode(Data(json.utf8))
+        #expect(annotations.count == 1)
+        let merged = try #require(annotations.first)
+        #expect(merged.kind == .strikeout)
+        #expect(merged.contents == "bound specified")
+        #expect(merged.statusTargetSourceID == "caret")
+    }
+
     @Test func groupsTextRepliesUnderTheirParent() {
         let root = Annotation(
             sourceID: "root", kind: .note, pageIndex: 0,
@@ -292,10 +440,12 @@ struct MuPDFAnnotationParserTests {
         #expect(threads[0].replies.map(\.sourceID) == ["reply"])
     }
 
-    @Test func writesAcrobatStatusToACopyOfTheAcceptancePDF() async throws {
-        guard let path = ProcessInfo.processInfo.environment["ANNOTVIEW_TEST_PDF"] else {
-            return
-        }
+    @Test(.enabled(
+        if: acceptanceTestsAreEnabled,
+        "Requires ANNOTVIEW_TEST_PDF and the mutool executable"
+    ))
+    func writesAcrobatStatusToACopyOfTheAcceptancePDF() async throws {
+        let path = try #require(acceptancePDFPath)
 
         let fileManager = FileManager.default
         let temporaryDirectory = fileManager.temporaryDirectory
@@ -324,5 +474,74 @@ struct MuPDFAnnotationParserTests {
         try await writer.updateStatus(in: copyURL, sourceID: targetID, status: .completed)
         let final = try await parser.annotations(in: copyURL)
         #expect(final.first { $0.statusTargetSourceID == targetID }?.status == .completed)
+    }
+}
+
+struct CLIInstallerTests {
+    @Test @MainActor
+    func installsSymlinkIntoPathAndUninstallsCleanly() throws {
+        let fileManager = FileManager.default
+        let root = fileManager.temporaryDirectory
+            .appendingPathComponent("CLIInstallerTest-\(UUID().uuidString)", isDirectory: true)
+        defer { try? fileManager.removeItem(at: root) }
+
+        // A fake app-bundle-shaped source with annotool inside Resources.
+        let resources = root.appendingPathComponent("Resources", isDirectory: true)
+        try fileManager.createDirectory(at: resources, withIntermediateDirectories: true)
+        let annotoolURL = resources.appendingPathComponent("annotool")
+        try "#! /usr/bin/env python3\nprint('annotool')\n".write(
+            to: annotoolURL, atomically: true, encoding: .utf8
+        )
+
+        let binDir = root.appendingPathComponent("bin", isDirectory: true)
+        try fileManager.createDirectory(at: binDir, withIntermediateDirectories: true)
+
+        let installer = CLIInstaller(
+            annotoolURL: annotoolURL,
+            binCandidates: [binDir],
+            pathCheckEnabled: false
+        )
+        #expect(!installer.isInstalled)
+
+        #expect(installer.install())
+        let symlink = binDir.appendingPathComponent("annotool")
+        #expect(installer.isInstalled)
+        #expect(fileManager.fileExists(atPath: symlink.path))
+        #expect(try fileManager.destinationOfSymbolicLink(atPath: symlink.path)
+            == annotoolURL.path)
+        // No copies were made: the symlink points into the source directory.
+        #expect(try fileManager.contentsOfDirectory(atPath: resources.path).count == 1)
+
+        #expect(installer.uninstall())
+        #expect(!installer.isInstalled)
+        #expect(!fileManager.fileExists(atPath: symlink.path))
+    }
+}
+
+
+struct AnnotationColorMemoryTests {
+    @Test @MainActor
+    func remembersLastUsedColorPerKind() {
+        let suite = "AnnotationColorMemoryTests-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defaults.removePersistentDomain(forName: suite)
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        let memory = AnnotationColorMemory(defaults: defaults)
+
+        // Initial defaults: sticky notes purple-blue, not yellow.
+        let note = memory.color(for: .note)
+        #expect(abs(note.red - 0.588242) < 0.001)
+        #expect(abs(note.blue - 0.988235) < 0.001)
+        let caret = memory.color(for: .caret)
+        #expect(abs(caret.red - 0.752945) < 0.001)
+
+        // Remembering a color for one kind does not affect others.
+        let custom = Annotation.Color(red: 0.1, green: 0.2, blue: 0.3, alpha: 0.8)
+        memory.set(custom, for: .note)
+        let remembered = memory.color(for: .note)
+        #expect(abs(remembered.red - 0.1) < 0.001)
+        #expect(abs(remembered.alpha - 0.8) < 0.001)
+        #expect(abs(memory.color(for: .caret).red - 0.752945) < 0.001)
     }
 }

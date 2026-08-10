@@ -1,41 +1,65 @@
 import AppKit
 import PDFKit
-import SwiftUI
 
 /// PDFKit draws only page content; this subclass paints engine-neutral annotations on top.
-final class AnnotationPDFView: PDFView, @preconcurrency PDFPageOverlayViewProvider, NSPopoverDelegate {
+final class AnnotationPDFView: PDFView, @preconcurrency PDFPageOverlayViewProvider {
+    var annotationTool: AnnotationTool = .selection {
+        didSet { window?.invalidateCursorRects(for: self) }
+    }
+    var onCreateMarkupRequest: (@MainActor (Annotation.Kind, PDFMarkupSelection) -> Void)?
+    var onCreateNoteRequest: (@MainActor (PDFPagePoint) -> Void)?
+    var onCreateInsertTextRequest: (@MainActor (PDFPagePoint) -> Void)?
+    var onUpdateAnnotation: (@MainActor (Annotation, String, Annotation.Color) async -> Bool)?
+    var onMoveAnnotationRequest: (@MainActor (Annotation, CGRect) -> Void)?
+    var onDeleteAnnotation: (@MainActor (Annotation) async -> Bool)?
+    var onSelectAnnotationRequest: (@MainActor (UUID) -> Void)?
+    var onDeselectAnnotationRequest: (@MainActor () -> Void)?
     var lastAnnotationNavigationID = 0
     var lastSearchNavigationID = 0
     var lastZoomRequestID = 0
-    private var annotationPopover: NSPopover?
-    private var presentedAnnotationID: UUID?
-    private var annotationPopoverIsPinned = false
-    private var hoverDismissTask: Task<Void, Never>?
-    private var hoverPresentationTask: Task<Void, Never>?
-    private var transientHighlightTask: Task<Void, Never>?
-    private var hoveredAnnotationID: UUID? {
-        didSet {
-            for overlay in pageOverlayViews.allObjects {
-                overlay.hoveredAnnotationID = hoveredAnnotationID
-            }
-        }
-    }
-    private var transientAnnotationID: UUID? {
-        didSet {
-            for overlay in pageOverlayViews.allObjects {
-                overlay.transientAnnotationID = transientAnnotationID
-            }
-        }
-    }
+    private var suppressesMarkupOnMouseUp = false
+    private var contextMenuAnnotation: Annotation?
+    private var contextMenuPagePoint: PDFPagePoint?
     private var mouseTrackingArea: NSTrackingArea?
+    private var dragState: (annotation: Annotation, page: PDFPage, startViewPoint: CGPoint, startBounds: CGRect)?
     private let pageOverlayViews = NSHashTable<AnnotationPageOverlayView>.weakObjects()
+
+    var selectedAnnotationID: UUID? {
+        didSet {
+            guard oldValue != selectedAnnotationID else { return }
+            for overlay in pageOverlayViews.allObjects {
+                overlay.selectedAnnotationID = selectedAnnotationID
+            }
+        }
+    }
+    private lazy var popoverCoordinator = AnnotationPopoverCoordinator(hostView: self)
+    private lazy var interactionController = AnnotationInteractionController(
+        onHoveredAnnotationChanged: { [weak self] annotationID in
+            guard let self else { return }
+            for overlay in self.pageOverlayViews.allObjects {
+                overlay.hoveredAnnotationID = annotationID
+            }
+        },
+        onTransientAnnotationChanged: { [weak self] annotationID in
+            guard let self else { return }
+            for overlay in self.pageOverlayViews.allObjects {
+                overlay.transientAnnotationID = annotationID
+            }
+        }
+    )
 
     var overlayAnnotations: [Int: [Annotation]] = [:] {
         didSet {
             for overlay in pageOverlayViews.allObjects {
                 overlay.annotations = overlayAnnotations[overlay.pageIndex] ?? []
             }
+            reconcileAnnotationInteraction()
         }
+    }
+
+    func resetAnnotationInteraction() {
+        interactionController.reset()
+        popoverCoordinator.reset()
     }
 
     func pdfView(_ view: PDFView, overlayViewFor page: PDFPage) -> NSView? {
@@ -46,8 +70,9 @@ final class AnnotationPDFView: PDFView, @preconcurrency PDFPageOverlayViewProvid
             page: page,
             pageIndex: pageIndex,
             annotations: overlayAnnotations[pageIndex] ?? [],
-            hoveredAnnotationID: hoveredAnnotationID,
-            transientAnnotationID: transientAnnotationID
+            hoveredAnnotationID: interactionController.hoveredAnnotationID,
+            transientAnnotationID: interactionController.transientAnnotationID,
+            selectedAnnotationID: selectedAnnotationID
         )
         pageOverlayViews.add(overlay)
         return overlay
@@ -65,79 +90,256 @@ final class AnnotationPDFView: PDFView, @preconcurrency PDFPageOverlayViewProvid
         mouseTrackingArea = trackingArea
     }
 
-    override func mouseMoved(with event: NSEvent) {
-        let viewPoint = convert(event.locationInWindow, from: nil)
-        let target = annotationTarget(at: viewPoint)
-        target == nil ? NSCursor.arrow.set() : NSCursor.pointingHand.set()
-        guard target?.annotation.id != hoveredAnnotationID else { return }
-
-        if let hoveredAnnotationID { dismissHoverPreview(for: hoveredAnnotationID) }
-        hoverPresentationTask?.cancel()
-        hoveredAnnotationID = target?.annotation.id
-        guard let target, target.annotation.hasCommentText else { return }
-
-        hoverPresentationTask = Task { @MainActor [weak self, weak page = target.page] in
-            try? await Task.sleep(for: .milliseconds(200))
-            guard !Task.isCancelled,
-                  self?.hoveredAnnotationID == target.annotation.id,
-                  let self, let page else { return }
-            self.presentAnnotation(target.annotation, on: page, pinned: false)
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        if annotationTool == .note {
+            addCursorRect(bounds, cursor: .crosshair)
         }
     }
 
+    override func mouseMoved(with event: NSEvent) {
+        let viewPoint = convert(event.locationInWindow, from: nil)
+        let target = annotationTarget(at: viewPoint)
+        if target != nil {
+            NSCursor.pointingHand.set()
+        } else if annotationTool == .note {
+            NSCursor.crosshair.set()
+        } else if annotationTool == .insertText {
+            NSCursor.iBeam.set()
+        } else if isOverText(at: viewPoint) {
+            NSCursor.iBeam.set()
+        } else {
+            NSCursor.arrow.set()
+        }
+        interactionController.updateHover(
+            annotation: target?.annotation,
+            page: target?.page,
+            presentationContext: popoverCoordinator.policyContext,
+            present: { [weak self] annotation, page in
+                self?.handleAnnotationPresentation(annotation, on: page, request: .hover)
+            }
+        )
+    }
+
     override func mouseExited(with event: NSEvent) {
-        if let hoveredAnnotationID { dismissHoverPreview(for: hoveredAnnotationID) }
-        hoveredAnnotationID = nil
-        hoverPresentationTask?.cancel()
+        interactionController.clearHover()
         NSCursor.arrow.set()
     }
 
     override func mouseDown(with event: NSEvent) {
         let viewPoint = convert(event.locationInWindow, from: nil)
-        if let target = annotationTarget(at: viewPoint), target.annotation.hasCommentText {
-            hoverPresentationTask?.cancel()
-            presentAnnotation(target.annotation, on: target.page, pinned: true)
+        suppressesMarkupOnMouseUp = false
+        if let target = annotationTarget(at: viewPoint) {
+            suppressesMarkupOnMouseUp = true
+            onSelectAnnotationRequest?(target.annotation.id)
+            interactionController.cancelPendingHoverPresentation()
+            // A hover preview may still be open or mid-close; dismiss it
+            // synchronously so pressing an annotation starts from a clean state
+            // (the preview re-appears pinned on mouseUp for notes/carets).
+            popoverCoordinator.dismiss()
+            if target.annotation.kind == .note || target.annotation.kind == .caret {
+                // Sticky notes and carets are position-based: start a drag and
+                // present the popup on mouseUp only if the note was not moved.
+                dragState = (
+                    annotation: target.annotation,
+                    page: target.page,
+                    startViewPoint: viewPoint,
+                    startBounds: target.annotation.bounds
+                )
+                return
+            }
+            handleAnnotationPresentation(target.annotation, on: target.page, request: .documentClick)
             return
         }
+        if annotationTool == .note || annotationTool == .insertText,
+           let page = page(for: viewPoint, nearest: false),
+           let document {
+            suppressesMarkupOnMouseUp = true
+            onDeselectAnnotationRequest?()
+            let rawPoint = convert(viewPoint, to: page)
+            let point = annotationTool == .insertText
+                ? insertionPoint(for: rawPoint, on: page)
+                : rawPoint
+            let location = PDFPagePoint(
+                pageIndex: document.index(for: page),
+                point: point
+            )
+            if annotationTool == .note {
+                onCreateNoteRequest?(location)
+            } else {
+                onCreateInsertTextRequest?(location)
+            }
+            return
+        }
+        onDeselectAnnotationRequest?()
         super.mouseDown(with: event)
     }
 
-    func presentAnnotation(_ annotation: Annotation, on page: PDFPage, pinned: Bool = true) {
-        hoverDismissTask?.cancel()
-        if presentedAnnotationID == annotation.id, annotationPopover?.isShown == true {
-            annotationPopoverIsPinned = annotationPopoverIsPinned || pinned
+    override func mouseDragged(with event: NSEvent) {
+        if dragState != nil {
+            updateDrag(to: convert(event.locationInWindow, from: nil))
+        } else {
+            super.mouseDragged(with: event)
+        }
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        if let drag = dragState {
+            dragState = nil
+            let viewPoint = convert(event.locationInWindow, from: nil)
+            let pagePoint = convert(viewPoint, to: drag.page)
+            let startPagePoint = convert(drag.startViewPoint, to: drag.page)
+            let moved = hypot(pagePoint.x - startPagePoint.x, pagePoint.y - startPagePoint.y)
+            if moved < 3 {
+                handleAnnotationPresentation(drag.annotation, on: drag.page, request: .documentClick)
+            } else if let onMoveAnnotationRequest {
+                onMoveAnnotationRequest(drag.annotation, drag.annotation.bounds)
+            }
             return
         }
-        annotationPopover?.close()
-        let popover = NSPopover()
-        popover.behavior = .transient
-        popover.animates = true
-        popover.delegate = self
-        let popoverHeight = Self.popoverHeight(for: annotation)
-        popover.contentSize = NSSize(width: 330, height: popoverHeight)
-        popover.contentViewController = NSHostingController(
-            rootView: AnnotationPopoverView(annotation: annotation, height: popoverHeight)
+        super.mouseUp(with: event)
+        guard !suppressesMarkupOnMouseUp,
+              let kind = annotationTool.markupKind,
+              let selection = markupSelection() else { return }
+        onCreateMarkupRequest?(kind, selection)
+        clearSelection()
+    }
+
+    private func updateDrag(to viewPoint: CGPoint) {
+        guard let drag = dragState else { return }
+        let pagePoint = convert(viewPoint, to: drag.page)
+        let startPagePoint = convert(drag.startViewPoint, to: drag.page)
+        let offset = CGPoint(
+            x: pagePoint.x - startPagePoint.x,
+            y: pagePoint.y - startPagePoint.y
         )
-        let anchor = convert(AnnotationOverlayRenderer.anchorBounds(for: annotation), from: page)
-        popover.show(relativeTo: anchor, of: self, preferredEdge: .maxX)
-        annotationPopover = popover
-        presentedAnnotationID = annotation.id
-        annotationPopoverIsPinned = pinned
+        var updated = drag.annotation
+        updated.bounds = drag.startBounds.offsetBy(dx: offset.x, dy: offset.y)
+        var pageAnnotations = overlayAnnotations[updated.pageIndex] ?? []
+        if let index = pageAnnotations.firstIndex(where: { $0.id == updated.id }) {
+            pageAnnotations[index] = updated
+            overlayAnnotations[updated.pageIndex] = pageAnnotations
+        }
+        dragState = (annotation: updated, page: drag.page, startViewPoint: drag.startViewPoint, startBounds: drag.startBounds)
+    }
+
+    override func menu(for event: NSEvent) -> NSMenu? {
+        let menu = super.menu(for: event) ?? NSMenu()
+        let viewPoint = convert(event.locationInWindow, from: nil)
+        contextMenuAnnotation = annotationTarget(at: viewPoint)?.annotation
+        if contextMenuAnnotation != nil {
+            if !menu.items.isEmpty { menu.addItem(.separator()) }
+            addMenuItem("Edit Annotation…", action: #selector(editAnnotationFromMenu(_:)), to: menu)
+            addMenuItem("Delete Annotation", action: #selector(deleteAnnotationFromMenu(_:)), to: menu)
+            return menu
+        }
+        contextMenuPagePoint = pagePoint(at: viewPoint)
+        if markupSelection() != nil {
+            // Text is selected: offer markup over the selection.
+            if !menu.items.isEmpty { menu.addItem(.separator()) }
+            addMenuItem("Add Highlight", action: #selector(addHighlightFromMenu(_:)), to: menu)
+            addMenuItem("Add Underline", action: #selector(addUnderlineFromMenu(_:)), to: menu)
+            addMenuItem("Add Strikethrough", action: #selector(addStrikeoutFromMenu(_:)), to: menu)
+        } else if contextMenuPagePoint != nil {
+            // No selection: offer point-based annotations at the click location.
+            if !menu.items.isEmpty { menu.addItem(.separator()) }
+            addMenuItem("Add Sticky Note", action: #selector(addNoteFromMenu(_:)), to: menu)
+            addMenuItem("Add Insert Text", action: #selector(addInsertTextFromMenu(_:)), to: menu)
+        }
+        return menu
+    }
+
+    private func pagePoint(at viewPoint: CGPoint) -> PDFPagePoint? {
+        guard let page = page(for: viewPoint, nearest: false), let document else { return nil }
+        return PDFPagePoint(
+            pageIndex: document.index(for: page),
+            point: convert(viewPoint, to: page)
+        )
+    }
+
+    @objc private func addNoteFromMenu(_ sender: Any?) {
+        guard let location = contextMenuPagePoint else { return }
+        onCreateNoteRequest?(location)
+    }
+
+    @objc private func addInsertTextFromMenu(_ sender: Any?) {
+        guard let location = contextMenuPagePoint else { return }
+        if let page = document?.page(at: location.pageIndex) {
+            onCreateInsertTextRequest?(
+                PDFPagePoint(
+                    pageIndex: location.pageIndex,
+                    point: insertionPoint(for: location.point, on: page)
+                )
+            )
+        } else {
+            onCreateInsertTextRequest?(location)
+        }
+    }
+
+    func markupSelection() -> PDFMarkupSelection? {
+        guard let document, let selection = currentSelection else { return nil }
+        var quadsByPage: [Int: [PDFMarkupQuad]] = [:]
+
+        for line in selection.selectionsByLine() {
+            for page in line.pages {
+                let bounds = line.bounds(for: page)
+                guard bounds.width > 0.01, bounds.height > 0.01 else { continue }
+                let pageIndex = document.index(for: page)
+                quadsByPage[pageIndex, default: []].append(
+                    PDFMarkupQuad(
+                        topLeft: CGPoint(x: bounds.minX, y: bounds.maxY),
+                        topRight: CGPoint(x: bounds.maxX, y: bounds.maxY),
+                        bottomLeft: CGPoint(x: bounds.minX, y: bounds.minY),
+                        bottomRight: CGPoint(x: bounds.maxX, y: bounds.minY)
+                    )
+                )
+            }
+        }
+
+        let pages = quadsByPage.keys.sorted().map {
+            PDFMarkupPageSelection(pageIndex: $0, quads: quadsByPage[$0] ?? [])
+        }
+        guard !pages.isEmpty else { return nil }
+        return PDFMarkupSelection(pages: pages, selectedText: selection.string ?? "")
+    }
+
+    @objc private func addHighlightFromMenu(_ sender: Any?) {
+        createMarkupFromMenu(kind: .highlight)
+    }
+
+    @objc private func addUnderlineFromMenu(_ sender: Any?) {
+        createMarkupFromMenu(kind: .underline)
+    }
+
+    @objc private func addStrikeoutFromMenu(_ sender: Any?) {
+        createMarkupFromMenu(kind: .strikeout)
+    }
+
+    @objc private func editAnnotationFromMenu(_ sender: Any?) {
+        guard let annotation = contextMenuAnnotation,
+              let page = document?.page(at: annotation.pageIndex) else { return }
+        handleAnnotationPresentation(annotation, on: page, request: .explicitEdit)
+    }
+
+    @objc private func deleteAnnotationFromMenu(_ sender: Any?) {
+        guard let annotation = contextMenuAnnotation else { return }
+        Task { @MainActor [weak self] in
+            if await self?.onDeleteAnnotation?(annotation) == true {
+                self?.popoverCoordinator.dismiss(for: annotation.id)
+            }
+        }
+    }
+
+    func handleAnnotationPresentation(
+        _ annotation: Annotation,
+        on page: PDFPage,
+        request: AnnotationPresentationRequest
+    ) {
+        popoverCoordinator.handle(annotation, on: page, request: request)
     }
 
     func flashTextRange(for annotation: Annotation) {
-        guard annotation.kind == .highlight
-                || annotation.kind == .underline
-                || annotation.kind == .strikeout,
-              !AnnotationOverlayRenderer.quadrilaterals(from: annotation).isEmpty else { return }
-
-        transientHighlightTask?.cancel()
-        transientAnnotationID = annotation.id
-        transientHighlightTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(for: .milliseconds(1_800))
-            guard !Task.isCancelled, self?.transientAnnotationID == annotation.id else { return }
-            self?.transientAnnotationID = nil
-        }
+        interactionController.flash(annotation)
     }
 
     func center(
@@ -170,26 +372,49 @@ final class AnnotationPDFView: PDFView, @preconcurrency PDFPageOverlayViewProvid
         completion()
     }
 
-    func popoverDidClose(_ notification: Notification) {
-        guard let closedPopover = notification.object as? NSPopover,
-              closedPopover === annotationPopover else { return }
-        annotationPopover = nil
-        presentedAnnotationID = nil
-        annotationPopoverIsPinned = false
+    func cancelPendingHoverPresentation() {
+        interactionController.cancelPendingHoverPresentation()
     }
 
-    func dismissHoverPreview(for annotationID: UUID) {
-        hoverDismissTask?.cancel()
-        hoverDismissTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(for: .milliseconds(450))
-            guard !Task.isCancelled,
-                  let self,
-                  self.presentedAnnotationID == annotationID,
-                  !self.annotationPopoverIsPinned else { return }
-            self.annotationPopover?.close()
-            self.annotationPopover = nil
-            self.presentedAnnotationID = nil
+    func mouseIsInsideAnnotation(_ annotationID: UUID, at screenPoint: CGPoint) -> Bool {
+        guard let window else { return false }
+        let windowPoint = window.convertPoint(fromScreen: screenPoint)
+        let viewPoint = convert(windowPoint, from: nil)
+        return annotationTarget(at: viewPoint)?.annotation.id == annotationID
+    }
+
+    /// Acrobat's Insert Text caret snaps to the baseline of the line under the
+    /// cursor: the exact click height within the line is ignored, and descenders
+    /// must not pull the marker down. Character boxes share one baseline, so the
+    /// line baseline is the highest character bottom found along the line.
+    private func insertionPoint(for pagePoint: CGPoint, on page: PDFPage) -> CGPoint {
+        let characterIndex = page.characterIndex(at: pagePoint)
+        guard characterIndex != NSNotFound else { return pagePoint }
+        let anchor = page.characterBounds(at: characterIndex)
+        guard anchor.width > 0, anchor.height > 0 else { return pagePoint }
+
+        let text = page.string ?? ""
+        var baseline = anchor.minY
+        let span = 80
+        let firstIndex = max(0, characterIndex - span)
+        let lastIndex = min(max(0, text.count - 1), characterIndex + span)
+        for index in firstIndex...lastIndex {
+            let bounds = page.characterBounds(at: index)
+            guard bounds.width > 0, bounds.height > 0 else { continue }
+            // Keep only characters on the same visual line as the anchor.
+            let verticalOverlap = min(anchor.maxY, bounds.maxY) - max(anchor.minY, bounds.minY)
+            guard verticalOverlap > 0 else { continue }
+            baseline = max(baseline, bounds.minY)
         }
+        return CGPoint(x: pagePoint.x, y: baseline)
+    }
+
+    private func isOverText(at viewPoint: CGPoint) -> Bool {
+        guard let page = page(for: viewPoint, nearest: false) else { return false }
+        let pagePoint = convert(viewPoint, to: page)
+        let characterIndex = page.characterIndex(at: pagePoint)
+        guard characterIndex != NSNotFound else { return false }
+        return page.characterBounds(at: characterIndex).insetBy(dx: -0.5, dy: -0.5).contains(pagePoint)
     }
 
     private func annotationTarget(at viewPoint: CGPoint) -> (annotation: Annotation, page: PDFPage)? {
@@ -202,178 +427,22 @@ final class AnnotationPDFView: PDFView, @preconcurrency PDFPageOverlayViewProvid
         return (annotation, page)
     }
 
-    private static func popoverHeight(for annotation: Annotation) -> CGFloat {
-        let text = annotation.contents?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let explicitLines = max(1, text.split(separator: "\n", omittingEmptySubsequences: false).count)
-        let wrappedLines = max(explicitLines, Int(ceil(Double(text.count) / 38.0)))
-        return min(260, max(132, 108 + CGFloat(wrappedLines) * 19))
-    }
-}
-
-/// One overlay per visible PDF page. Mapping three basis points through
-/// PDFView produces the affine page-to-overlay transform, including CropBox,
-/// rotation, zoom, continuous-page layout and a non-zero PDF page origin.
-private final class AnnotationPageOverlayView: NSView {
-    weak var pdfView: AnnotationPDFView?
-    weak var page: PDFPage?
-    let pageIndex: Int
-    var hoveredAnnotationID: UUID? {
-        didSet {
-            if oldValue != hoveredAnnotationID { needsDisplay = true }
-        }
-    }
-    var transientAnnotationID: UUID? {
-        didSet {
-            if oldValue != transientAnnotationID { needsDisplay = true }
-        }
-    }
-    var annotations: [Annotation] {
-        didSet { needsDisplay = true }
+    private func reconcileAnnotationInteraction() {
+        let availableIDs = Set(overlayAnnotations.values.joined().map(\.id))
+        interactionController.reconcile(availableAnnotationIDs: availableIDs)
+        popoverCoordinator.reconcile(availableAnnotationIDs: availableIDs)
     }
 
-    init(
-        pdfView: AnnotationPDFView,
-        page: PDFPage,
-        pageIndex: Int,
-        annotations: [Annotation],
-        hoveredAnnotationID: UUID?,
-        transientAnnotationID: UUID?
-    ) {
-        self.pdfView = pdfView
-        self.page = page
-        self.pageIndex = pageIndex
-        self.annotations = annotations
-        self.hoveredAnnotationID = hoveredAnnotationID
-        self.transientAnnotationID = transientAnnotationID
-        super.init(frame: .zero)
-        wantsLayer = true
-        layer?.backgroundColor = NSColor.clear.cgColor
+    private func addMenuItem(_ title: String, action: Selector, to menu: NSMenu) {
+        let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+        item.target = self
+        menu.addItem(item)
     }
 
-    @available(*, unavailable)
-    required init?(coder: NSCoder) { nil }
-
-    override func draw(_ dirtyRect: NSRect) {
-        super.draw(dirtyRect)
-        guard let context = NSGraphicsContext.current?.cgContext,
-              let transform = pageToOverlayTransform() else { return }
-        context.saveGState()
-        context.concatenate(transform)
-        AnnotationOverlayRenderer.draw(annotations, context: context)
-        let emphasizedID = hoveredAnnotationID ?? transientAnnotationID
-        if let emphasized = annotations.last(where: { $0.id == emphasizedID }) {
-            AnnotationOverlayRenderer.drawHover(for: emphasized, context: context)
-        }
-        context.restoreGState()
+    private func createMarkupFromMenu(kind: Annotation.Kind) {
+        guard let selection = markupSelection() else { return }
+        onCreateMarkupRequest?(kind, selection)
+        clearSelection()
     }
 
-    override func hitTest(_ point: NSPoint) -> NSView? {
-        // Drawing only. PDFView handles annotation interaction so PDFKit never opens
-        // its native annotation editor underneath this custom overlay.
-        nil
-    }
-
-    private func pageToOverlayTransform() -> CGAffineTransform? {
-        guard let pdfView, let page else { return nil }
-        let pageBounds = page.bounds(for: pdfView.displayBox)
-        let origin = localPoint(for: pageBounds.origin, pdfView: pdfView, page: page)
-        let xBasis = localPoint(
-            for: CGPoint(x: pageBounds.minX + 1, y: pageBounds.minY),
-            pdfView: pdfView,
-            page: page
-        )
-        let yBasis = localPoint(
-            for: CGPoint(x: pageBounds.minX, y: pageBounds.minY + 1),
-            pdfView: pdfView,
-            page: page
-        )
-        return PageOverlayGeometry.affineTransform(
-            pageBounds: pageBounds,
-            localOrigin: origin,
-            localXBasis: xBasis,
-            localYBasis: yBasis
-        )
-    }
-
-    private func localPoint(
-        for pagePoint: CGPoint,
-        pdfView: PDFView,
-        page: PDFPage
-    ) -> CGPoint {
-        convert(pdfView.convert(pagePoint, from: page), from: pdfView)
-    }
-}
-
-private struct AnnotationPopoverView: View {
-    let annotation: Annotation
-    let height: CGFloat
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 9) {
-            HStack(alignment: .top, spacing: 9) {
-                Image(systemName: annotation.popupSymbolName)
-                    .foregroundStyle(.secondary)
-                    .frame(width: 16)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(annotation.author?.nilIfEmpty ?? "Unknown author")
-                        .font(.headline)
-                    HStack(spacing: 5) {
-                        Text(annotation.popupKindName)
-                        if let date = annotation.createdDate {
-                            Text("·")
-                            Text(date, format: .dateTime.year().month().day().hour().minute())
-                        }
-                        Text("·")
-                        Label(annotation.status.displayName, systemImage: annotation.status.symbolName)
-                            .foregroundStyle(annotation.status.tint)
-                    }
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                }
-                Spacer()
-            }
-            Divider()
-            ScrollView {
-                Text(annotation.contents?.nilIfEmpty ?? "No comment text")
-                    .font(.body)
-                    .foregroundStyle(.primary)
-                    .textSelection(.enabled)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .frame(maxWidth: .infinity, alignment: .topLeading)
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        }
-        .padding(14)
-        .frame(width: 330, height: height, alignment: .topLeading)
-    }
-}
-
-private extension String {
-    var nilIfEmpty: String? { isEmpty ? nil : self }
-}
-
-private extension Annotation {
-    var hasCommentText: Bool {
-        contents?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
-    }
-
-    var popupKindName: String {
-        switch kind {
-        case .highlight: "Highlight"
-        case .underline: "Underline"
-        case .strikeout: "Strikeout"
-        case .note: "Note"
-        case .ink: "Ink"
-        }
-    }
-
-    var popupSymbolName: String {
-        switch kind {
-        case .highlight: "highlighter"
-        case .underline: "underline"
-        case .strikeout: "strikethrough"
-        case .note: "note.text"
-        case .ink: "scribble"
-        }
-    }
 }

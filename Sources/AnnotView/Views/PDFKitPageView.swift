@@ -6,11 +6,21 @@ struct PDFKitPageView: NSViewRepresentable {
     let annotations: [Annotation]
     let focusedAnnotation: Annotation?
     let annotationNavigationID: Int
+    let selectedAnnotationID: UUID?
+    let onSelectAnnotationRequest: @MainActor (UUID) -> Void
+    let onDeselectAnnotationRequest: @MainActor () -> Void
     let searchResults: [PDFSelection]
     let currentSearchResultIndex: Int?
     let searchNavigationID: Int
     let zoomAction: PDFDocumentManager.ZoomAction
     let zoomRequestID: Int
+    let annotationTool: AnnotationTool
+    let onCreateMarkupRequest: @MainActor (Annotation.Kind, PDFMarkupSelection) -> Void
+    let onCreateNoteRequest: @MainActor (PDFPagePoint) -> Void
+    let onCreateInsertTextRequest: @MainActor (PDFPagePoint) -> Void
+    let onUpdateAnnotation: @MainActor (Annotation, String, Annotation.Color) async -> Bool
+    let onMoveAnnotationRequest: @MainActor (Annotation, CGRect) -> Void
+    let onDeleteAnnotation: @MainActor (Annotation) async -> Bool
     @Binding var selectedPageIndex: Int
 
     func makeCoordinator() -> Coordinator {
@@ -27,12 +37,17 @@ struct PDFKitPageView: NSViewRepresentable {
         view.backgroundColor = .windowBackgroundColor
         view.delegate = context.coordinator
         view.pageOverlayViewProvider = view
+        view.selectedAnnotationID = selectedAnnotationID
+        view.onSelectAnnotationRequest = onSelectAnnotationRequest
+        view.onDeselectAnnotationRequest = onDeselectAnnotationRequest
+        configureAnnotationInteraction(on: view)
         context.coordinator.observe(view)
         return view
     }
 
     func updateNSView(_ view: AnnotationPDFView, context: Context) {
         if view.document !== document {
+            view.resetAnnotationInteraction()
             view.document = document
             view.autoScales = false
             let fittedScale = view.scaleFactorForSizeToFit
@@ -42,6 +57,10 @@ struct PDFKitPageView: NSViewRepresentable {
         }
         view.overlayAnnotations = Dictionary(grouping: annotations, by: \.pageIndex)
         view.highlightedSelections = searchResults
+        view.selectedAnnotationID = selectedAnnotationID
+        view.onSelectAnnotationRequest = onSelectAnnotationRequest
+        view.onDeselectAnnotationRequest = onDeselectAnnotationRequest
+        configureAnnotationInteraction(on: view)
 
         if view.lastSearchNavigationID != searchNavigationID {
             view.lastSearchNavigationID = searchNavigationID
@@ -76,9 +95,11 @@ struct PDFKitPageView: NSViewRepresentable {
             view.lastAnnotationNavigationID = annotationNavigationID
             view.center(annotation: focusedAnnotation, on: targetPage) {
                 view.flashTextRange(for: focusedAnnotation)
-                if focusedAnnotation.hasCommentText {
-                    view.presentAnnotation(focusedAnnotation, on: targetPage)
-                }
+                view.handleAnnotationPresentation(
+                    focusedAnnotation,
+                    on: targetPage,
+                    request: .sidebarNavigation
+                )
             }
         }
 
@@ -91,7 +112,18 @@ struct PDFKitPageView: NSViewRepresentable {
     }
 
     static func dismantleNSView(_ view: AnnotationPDFView, coordinator: Coordinator) {
+        view.resetAnnotationInteraction()
         coordinator.stopObserving()
+    }
+
+    private func configureAnnotationInteraction(on view: AnnotationPDFView) {
+        view.annotationTool = annotationTool
+        view.onCreateMarkupRequest = onCreateMarkupRequest
+        view.onCreateNoteRequest = onCreateNoteRequest
+        view.onCreateInsertTextRequest = onCreateInsertTextRequest
+        view.onUpdateAnnotation = onUpdateAnnotation
+        view.onMoveAnnotationRequest = onMoveAnnotationRequest
+        view.onDeleteAnnotation = onDeleteAnnotation
     }
 
     @MainActor
@@ -119,11 +151,5 @@ struct PDFKitPageView: NSViewRepresentable {
         func stopObserving() {
             if let observer { NotificationCenter.default.removeObserver(observer) }
         }
-    }
-}
-
-private extension Annotation {
-    var hasCommentText: Bool {
-        contents?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
     }
 }

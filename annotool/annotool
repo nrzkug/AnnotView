@@ -1,0 +1,699 @@
+#!/usr/bin/env python3
+"""annotool — read and write Acrobat PDF annotations via MuPDF.
+
+A small headless CLI that wraps the MuPDF annotation scripts. Designed for
+AI agents: every command speaks structured JSON (--json) or a compact
+human-readable view, and all coordinates are in PDF user space
+(bottom-left origin, y up, page size reported per page).
+
+Requires: mutool (Homebrew: brew install mupdf; honored via $MUTOOL_PATH).
+
+Commands:
+  read       list annotations (--json for structured output)
+  show       annotations merged with the text they cover (the AI-friendly view)
+  text       per-page text lines with coordinates
+  baseline   text baseline (y) at a page position, for caret placement
+  add-markup add a highlight/underline/strikeout over a rectangle
+  add-note   add a sticky note at a point
+  add-caret  add an Acrobat Insert-Text caret at a point (baseline-snapped)
+  update     change an annotation's contents/author/color
+  delete     remove an annotation (by object number)
+  status     set Acrobat review state on an annotation
+"""
+
+import argparse
+import datetime
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+
+# realpath resolves the PATH symlink so the app-bundle lookup below works
+# when annotool is invoked through ~/.local/bin/annotool -> app bundle.
+HERE = os.path.dirname(os.path.realpath(__file__))
+
+# Locate the MuPDF bridge scripts. Resolution order:
+#   1. $ANNOTOOL_MUPDF_DIR (explicit override)
+#   2. the AnnotView app bundle (Contents/Resources/AnnotView_AnnotView.bundle)
+# The scripts ship inside the app; there is no repo fallback.
+SIBLING_MUPDF_DIR = HERE
+APP_BUNDLE_MUPDF_DIR = os.path.join(
+    HERE, "AnnotView_AnnotView.bundle", "Contents", "Resources"
+)
+
+def _pick_mupdf_dir():
+    env = os.environ.get("ANNOTOOL_MUPDF_DIR")
+    if env:
+        return env
+    for candidate in (SIBLING_MUPDF_DIR, APP_BUNDLE_MUPDF_DIR):
+        if os.path.isfile(os.path.join(candidate, "annotations.js")):
+            return candidate
+    raise SystemExit(
+        "annotool could not locate the MuPDF bridge scripts (annotations.js). "
+        "Run annotool from inside the AnnotView app bundle, or set "
+        "ANNOTOOL_MUPDF_DIR to the directory containing the scripts."
+    )
+
+MUPDF_DIR = _pick_mupdf_dir()
+
+SCRIPTS = {
+    name: os.path.join(MUPDF_DIR, name + ".js")
+    for name in ("annotations", "write_annotation", "update_annotation_status")
+}
+
+for _name, _path in SCRIPTS.items():
+    if not os.path.isfile(_path):
+        raise SystemExit(
+            f"missing MuPDF script {_path}. Set ANNOTOOL_MUPDF_DIR to the "
+            "AnnotView Resources/MuPDF directory (or clone the annota repo)."
+        )
+
+# Annotation kind names, matching the AnnotView Swift model.
+KIND_NAMES = {
+    "Highlight": "highlight",
+    "Underline": "underline",
+    "StrikeOut": "strikeout",
+    "Text": "note",
+    "Ink": "ink",
+    "Caret": "caret",
+}
+
+COLOR_PRESETS = {
+    "highlight": (1.0, 0.819608, 0.0),
+    "yellow": (1.0, 0.819608, 0.0),
+    "underline": (0.243, 0.725, 0.353),
+    "green": (0.243, 0.725, 0.353),
+    "strikeout": (0.972549, 0.392151, 0.392151),
+    "red": (0.972549, 0.392151, 0.392151),
+    "caret-red": (0.972549, 0.392151, 0.392151),
+    "caret-purple": (0.752945, 0.215683, 0.768631),
+    "purple": (0.752945, 0.215683, 0.768631),
+    "blue": (0.0, 0.4, 1.0),
+}
+
+STATUS_STATES = ["none", "accepted", "rejected", "cancelled", "completed", "marked", "unmarked"]
+
+
+# ---------------------------------------------------------------------------
+# MuPDF plumbing
+# ---------------------------------------------------------------------------
+
+def find_mutool():
+    candidates = []
+    env = os.environ.get("MUTOOL_PATH")
+    if env:
+        candidates.append(env)
+    candidates += ["/opt/homebrew/bin/mutool", "/usr/local/bin/mutool"]
+    candidates += [os.path.join(p, "mutool") for p in os.environ.get("PATH", "").split(os.pathsep)]
+    for path in candidates:
+        if path and os.path.isfile(path) and os.access(path, os.X_OK):
+            return path
+    raise SystemExit("mutool not found. Install with 'brew install mupdf' or set MUTOOL_PATH.")
+
+
+def run_js(script, *args):
+    mutool = find_mutool()
+    proc = subprocess.run(
+        [mutool, "run", SCRIPTS[script], *args],
+        capture_output=True, text=True, check=False,
+    )
+    if proc.returncode != 0:
+        raise SystemExit(f"{script} failed ({proc.returncode}): {proc.stderr.strip() or proc.stdout.strip()}")
+    return proc.stdout
+
+
+def apply_transform(point, t):
+    """PDF user space -> MuPDF page space (or vice versa) via a 6-tuple matrix."""
+    a, b, c, d, e, f = t
+    x, y = point
+    return (x * a + y * c + e, x * b + y * d + f)
+
+
+def rect_of(points):
+    xs = [p[0] for p in points]
+    ys = [p[1] for p in points]
+    return (min(xs), min(ys), max(xs), max(ys))
+
+
+def to_user(rect, t):
+    p0 = apply_transform((rect[0], rect[1]), t)
+    p1 = apply_transform((rect[2], rect[3]), t)
+    return rect_of([p0, p1])
+
+
+def timestamp_now():
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def parse_color(value):
+    if value is None:
+        return None
+    if value in COLOR_PRESETS:
+        return list(COLOR_PRESETS[value])
+    parts = value.split(",")
+    if len(parts) == 3:
+        try:
+            return [float(x) for x in parts]
+        except ValueError:
+            pass
+    raise SystemExit(f"unknown color {value!r}; use a preset or r,g,b floats")
+
+
+# ---------------------------------------------------------------------------
+# Reading
+# ---------------------------------------------------------------------------
+
+def read_pages(pdf):
+    """Return raw annotations.js output normalized with user-space coordinates."""
+    raw = json.loads(run_js("annotations", pdf))
+    pages = []
+    for page in raw.get("pages", []):
+        t = page["pageTransform"]
+        pb = page.get("pageBounds") or [0, 0, 1, 1]
+        user_bounds = to_user(pb, t)
+        annotations = []
+        for a in page.get("annotations", []):
+            if a["type"] == "Link":
+                continue
+            annotations.append({
+                "sourceID": a["sourceID"],
+                "inReplyToSourceID": a["inReplyToSourceID"],
+                "type": a["type"],
+                "kind": KIND_NAMES.get(a["type"], a["type"].lower()),
+                "bounds": to_user(a["bounds"], t),
+                "quadPoints": [
+                    [tuple(apply_transform((q[i], q[i + 1]), t))
+                     for i in range(0, len(q) - 1, 2)]
+                    for q in a.get("quadPoints", [])
+                ],
+                "contents": a.get("contents"),
+                "author": a.get("author"),
+                "createdDate": a.get("creationDate"),
+                "color": a.get("color") or [],
+                "opacity": a.get("opacity", 1),
+                "stateModel": a.get("stateModel"),
+                "state": a.get("state"),
+            })
+        pages.append({
+            "pageIndex": page["pageIndex"],
+            "pageTransform": t,
+            "pageWidth": user_bounds[2] - user_bounds[0],
+            "pageHeight": user_bounds[3] - user_bounds[1],
+            "annotations": annotations,
+        })
+    return pages
+
+
+def map_status(model, state):
+    value = (state or "").lower()
+    if model and model.lower() == "marked":
+        return "marked" if value == "marked" else "unmarked"
+    if value in ("accepted", "rejected", "cancelled", "completed"):
+        return value
+    return "none"
+
+
+def normalize(pdf):
+    """Apply the same user-facing model as AnnotView:
+    - drop Link annotations
+    - merge Acrobat replacement edits (Caret parent + IRT StrikeOut child)
+      into one annotation and skip the standalone caret
+    - map colors to RGB+opacity and state to a status string
+    """
+    pages = read_pages(pdf)
+    out_pages = []
+    for page in pages:
+        annots = page["annotations"]
+        by_id = {a["sourceID"]: a for a in annots if a["sourceID"]}
+        parent_ids = {a["inReplyToSourceID"] for a in annots if a["inReplyToSourceID"]}
+
+        result = []
+        for a in annots:
+            if a["kind"] == "caret" and a["sourceID"] in parent_ids:
+                continue  # already merged into its IRT child below
+            caret_parent = None
+            if a["inReplyToSourceID"] in by_id:
+                candidate = by_id[a["inReplyToSourceID"]]
+                if candidate["type"] == "Caret":
+                    caret_parent = candidate
+
+            color = a["color"]
+            opacity = a["opacity"]
+            if len(color) == 4:  # CMYK
+                c, m, y, k = color[:4]
+                rgb = (1 - min(1, c + k), 1 - min(1, m + k), 1 - min(1, y + k))
+            elif len(color) == 3:  # RGB
+                rgb = (color[0], color[1], color[2])
+            elif len(color) == 1:  # gray
+                rgb = (color[0], color[0], color[0])
+            else:
+                rgb = (1, 0.82, 0)
+                opacity = 1
+
+            result.append({
+                "sourceID": a["sourceID"],
+                "inReplyToSourceID": None if caret_parent else a["inReplyToSourceID"],
+                "statusTargetSourceID": (caret_parent or a)["sourceID"],
+                "kind": a["kind"],
+                "pageIndex": page["pageIndex"],
+                "bounds": a["bounds"],
+                "quadPoints": a["quadPoints"],
+                "contents": a["contents"] or (caret_parent or {}).get("contents"),
+                "author": a["author"] or (caret_parent or {}).get("author"),
+                "createdDate": (a["createdDate"] or (caret_parent or {}).get("createdDate")
+                                or a.get("modificationDate")),
+                "color": list(rgb) + [opacity],
+                "status": map_status(
+                    (caret_parent or a).get("stateModel"),
+                    (caret_parent or a).get("state"),
+                ),
+            })
+        out_pages.append({
+            "pageIndex": page["pageIndex"],
+            "pageWidth": page["pageWidth"],
+            "pageHeight": page["pageHeight"],
+            "annotations": result,
+        })
+    return out_pages
+
+
+def read_text_lines(pdf):
+    """Per-page text lines in PDF user space, from mutool stext output."""
+    import subprocess as sp
+    mutool = find_mutool()
+    proc = sp.run([mutool, "draw", "-q", "-F", "stext.json", pdf],
+                  capture_output=True, text=True, check=False)
+    if proc.returncode != 0:
+        raise SystemExit(f"text extraction failed: {proc.stderr.strip()}")
+    raw = json.loads(proc.stdout)
+    transforms = [p["pageTransform"] for p in read_pages(pdf)]
+    pages = []
+    for index, page in enumerate(raw.get("pages", [])):
+        t = transforms[index] if index < len(transforms) else [1, 0, 0, 1, 0, 0]
+        lines = []
+        for block in page.get("blocks", []):
+            if block.get("type") != "text":
+                continue
+            for line in block.get("lines", []):
+                b = line["bbox"]
+                text = line.get("text", "")
+                if not text.strip():
+                    continue
+                corners = [(b["x"], b["y"]), (b["x"] + b["w"], b["y"] + b["h"])]
+                corners = [apply_transform(p, t) for p in corners]
+                lines.append({"bbox": rect_of(corners), "text": text})
+        lines.sort(key=lambda l: (-l["bbox"][3], l["bbox"][0]))
+        pages.append(lines)
+    return pages
+
+
+def find_line_at(pages, page_index, x, y, tolerance_frac=1.5):
+    """Nearest text line (in user space) whose vertical band contains y."""
+    if page_index >= len(pages):
+        return None
+    lines = pages[page_index]
+    best = None
+    for line in lines:
+        x0, y0, x1, y1 = line["bbox"]
+        if x0 - 2 <= x <= x1 + 2:
+            height = max(0.1, y1 - y0)
+            if y0 - tolerance_frac * height <= y <= y1 + tolerance_frac * height:
+                dist = 0 if y0 <= y <= y1 else min(abs(y - y0), abs(y - y1))
+                if best is None or dist < best[0]:
+                    best = (dist, line)
+    return best[1] if best else None
+
+
+# ---------------------------------------------------------------------------
+# Writing
+# ---------------------------------------------------------------------------
+
+def write_operations(pdf, operations, output):
+    target = output or pdf
+    fd, payload_path = tempfile.mkstemp(suffix=".json")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump({"version": 2, "operations": operations}, f)
+        run_js("write_annotation", pdf, target, payload_path)
+    finally:
+        os.unlink(payload_path)
+
+
+def quad_for_rect(x0, y0, x1, y1):
+    # Acrobat QuadPoints order: top-left, top-right, bottom-left, bottom-right.
+    return [x0, y1, x1, y1, x0, y0, x1, y0]
+
+
+def lookup_source_id(pdf, ident):
+    for page in normalize(pdf):
+        for a in page["annotations"]:
+            if a["sourceID"] == ident or a["statusTargetSourceID"] == ident:
+                return a["statusTargetSourceID"]
+    raise SystemExit(f"annotation object {ident!r} not found")
+
+
+# ---------------------------------------------------------------------------
+# Commands
+# ---------------------------------------------------------------------------
+
+def cmd_read(args):
+    pages = normalize(args.pdf)
+    if args.json:
+        print(json.dumps({"pdf": args.pdf, "pages": pages}, ensure_ascii=False, indent=2))
+        return
+    total = 0
+    for page in pages:
+        annots = page["annotations"]
+        if args.page is not None and page["pageIndex"] != args.page - 1:
+            continue
+        annots = [a for a in annots
+                  if (args.page is None or a["pageIndex"] == args.page - 1)
+                  and (args.author is None or a["author"] == args.author)
+                  and (args.kind is None or a["kind"] == args.kind)]
+        if not annots:
+            continue
+        total += len(annots)
+        print(f"Page {page['pageIndex'] + 1}  (size {page['pageWidth']:.0f} x {page['pageHeight']:.0f})")
+        for a in annots:
+            b = a["bounds"]
+            contents = (a["contents"] or "").replace("\n", " ")[:80]
+            print(f"  obj{a['sourceID']:<5} {a['kind']:<9} {a['author'] or '?':<12} "
+                  f"[{b[0]:.1f}, {b[1]:.1f}, {b[2]:.1f}, {b[3]:.1f}]  {contents}")
+    print(f"Total: {total} annotations")
+
+
+def cmd_show(args):
+    pages = normalize(args.pdf)
+    text_pages = read_text_lines(args.pdf)
+
+    def covered_text(annotation, lines):
+        if annotation["kind"] in ("highlight", "underline", "strikeout", "ink"):
+            quads = annotation["quadPoints"] or []
+            quad_boxes = [rect_of(q) for q in quads]
+            hits = []
+            for line in lines:
+                for qb in quad_boxes:
+                    if rects_intersect(qb, line["bbox"]):
+                        hits.append(line)
+                        break
+        else:
+            cx = annotation["bounds"][0] + (annotation["bounds"][2] - annotation["bounds"][0]) / 2
+            cy = annotation["bounds"][1] + (annotation["bounds"][3] - annotation["bounds"][1]) / 2
+            line = find_line_at([lines], 0, cx, cy)
+            hits = [line] if line else []
+        hits.sort(key=lambda l: (-l["bbox"][3], l["bbox"][0]))
+        return " ".join(l["text"] for l in hits).strip()
+
+    if args.json:
+        result = []
+        for page in pages:
+            lines = text_pages[page["pageIndex"]] if page["pageIndex"] < len(text_pages) else []
+            for a in page["annotations"]:
+                entry = dict(a)
+                entry["coveredText"] = covered_text(a, lines)
+                result.append(entry)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return
+
+    for page in pages:
+        if args.page is not None and page["pageIndex"] != args.page - 1:
+            continue
+        lines = text_pages[page["pageIndex"]] if page["pageIndex"] < len(text_pages) else []
+        for a in page["annotations"]:
+            if args.author is not None and a["author"] != args.author:
+                continue
+            if args.kind is not None and a["kind"] != args.kind:
+                continue
+            print(f"--- Page {a['pageIndex'] + 1}  obj{a['sourceID']}  {a['kind']}  "
+                  f"{a['author'] or '?'}  [{a['status']}]")
+            if a["contents"]:
+                print(f"    comment: {a['contents']}")
+            covered = covered_text(a, lines)
+            if covered:
+                print(f"    covered: \"{covered}\"")
+
+
+def rects_intersect(a, b):
+    return not (a[2] <= b[0] or b[2] <= a[0] or a[3] <= b[1] or b[3] <= a[1])
+
+
+def cmd_text(args):
+    pages = read_text_lines(args.pdf)
+    if args.json:
+        print(json.dumps(pages, ensure_ascii=False, indent=2))
+        return
+    for i, lines in enumerate(pages):
+        if args.page is not None and i != args.page - 1:
+            continue
+        print(f"Page {i + 1}")
+        for line in lines:
+            b = line["bbox"]
+            print(f"  y {b[1]:7.1f}-{b[3]:7.1f}  x {b[0]:7.1f}-{b[2]:7.1f}  {line['text']}")
+
+
+def cmd_baseline(args):
+    pages = normalize(args.pdf)
+    text_pages = read_text_lines(args.pdf)
+    page_index = args.page - 1
+    if page_index < 0 or page_index >= len(text_pages):
+        raise SystemExit("page out of range")
+    line = find_line_at(text_pages, page_index, args.x, args.y)
+    if line is None:
+        print(json.dumps({"baseline": args.y, "line": None, "snapped": False}))
+        return
+    baseline = line["bbox"][1]
+    print(json.dumps({"baseline": baseline, "line": line["text"],
+                      "x0": line["bbox"][0], "x1": line["bbox"][2], "snapped": True},
+                     ensure_ascii=False))
+
+
+def cmd_add_markup(args):
+    x0, y0, x1, y1 = (float(v) for v in args.rect.split(","))
+    if x1 < x0:
+        x0, x1 = x1, x0
+    if y1 < y0:
+        y0, y1 = y1, y0
+    quad = quad_for_rect(x0, y0, x1, y1)
+    subtypes = {"highlight": "Highlight", "underline": "Underline", "strikeout": "StrikeOut"}
+    color = parse_color(args.color) or {
+        "highlight": [1.0, 0.819608, 0.0],
+        "underline": [0.243, 0.725, 0.353],
+        "strikeout": [0.972549, 0.392151, 0.392151],
+    }[args.kind]
+    opacity = args.opacity if args.opacity is not None else (0.4 if args.kind == "highlight" else 1)
+    write_operations(args.pdf, [{
+        "operation": "createMarkup",
+        "subtype": subtypes[args.kind],
+        "name": args.name or os.urandom(8).hex().upper(),
+        "author": args.author or "annotool",
+        "contents": args.contents or "",
+        "timestamp": timestamp_now(),
+        "color": color,
+        "opacity": opacity,
+        "pages": [{"pageIndex": args.page - 1, "quads": [quad]}],
+    }], args.output)
+    print(f"added {args.kind} on page {args.page}")
+
+
+def cmd_add_note(args):
+    color = parse_color(args.color) or [1.0, 0.819608, 0.0]
+    write_operations(args.pdf, [{
+        "operation": "createNote",
+        "name": args.name or os.urandom(8).hex().upper(),
+        "author": args.author or "annotool",
+        "contents": args.contents or "",
+        "timestamp": timestamp_now(),
+        "color": color,
+        "opacity": args.opacity if args.opacity is not None else 1,
+        "location": {"pageIndex": args.page - 1, "point": [args.x, args.y]},
+    }], args.output)
+    print(f"added note on page {args.page} at ({args.x}, {args.y})")
+
+
+def cmd_add_caret(args):
+    # Snap y to the text baseline when a line is nearby, like Acrobat does.
+    text_pages = read_text_lines(args.pdf)
+    line = find_line_at(text_pages, args.page - 1, args.x, args.y)
+    baseline = line["bbox"][1] if line else args.y
+    color = parse_color(args.color) or [0.972549, 0.392151, 0.392151]
+    write_operations(args.pdf, [{
+        "operation": "createCaret",
+        "name": args.name or os.urandom(8).hex().upper(),
+        "author": args.author or "annotool",
+        "contents": args.contents or "",
+        "timestamp": timestamp_now(),
+        "color": color,
+        "opacity": args.opacity if args.opacity is not None else 1,
+        "location": {"pageIndex": args.page - 1, "point": [args.x, baseline]},
+    }], args.output)
+    where = f"baseline {baseline:.1f}" if line else f"y {baseline:.1f} (no text nearby)"
+    print(f"added caret on page {args.page} at x={args.x}, {where}")
+
+
+def cmd_update(args):
+    source_id = lookup_source_id(args.pdf, args.id)
+    color = parse_color(args.color)
+    payload = {
+        "operation": "update",
+        "sourceID": source_id,
+        "author": args.author,
+        "contents": args.contents,
+        "timestamp": timestamp_now(),
+    }
+    if color is not None:
+        payload["color"] = color
+    if args.opacity is not None:
+        payload["opacity"] = args.opacity
+    write_operations(args.pdf, [payload], args.output)
+    print(f"updated obj{source_id}")
+
+
+def cmd_delete(args):
+    source_id = lookup_source_id(args.pdf, args.id)
+    write_operations(args.pdf, [{"operation": "delete", "sourceID": source_id}], args.output)
+    print(f"deleted obj{source_id}")
+
+
+def cmd_move(args):
+    source_id = lookup_source_id(args.pdf, args.id)
+    x0, y0, x1, y1 = (float(v) for v in args.rect.split(","))
+    if x1 < x0:
+        x0, x1 = x1, x0
+    if y1 < y0:
+        y0, y1 = y1, y0
+    write_operations(args.pdf, [{
+        "operation": "move",
+        "sourceID": source_id,
+        "rect": [x0, y0, x1, y1],
+        "timestamp": timestamp_now(),
+    }], args.output)
+    print(f"moved obj{source_id} to [{x0}, {y0}, {x1}, {y1}]")
+
+
+def cmd_status(args):
+    source_id = lookup_source_id(args.pdf, args.id)
+    state = args.status
+    if state == "none":
+        model, value = "Review", "None"
+    elif state in ("marked", "unmarked"):
+        model, value = "Marked", state.capitalize()
+    else:
+        model, value = "Review", state.capitalize()
+    target = args.output or args.pdf
+    run_js("update_annotation_status", args.pdf, target, source_id, model, value)
+    print(f"set obj{source_id} status to {state}")
+
+
+# ---------------------------------------------------------------------------
+
+def main():
+    parser = argparse.ArgumentParser(prog="annotool", description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    p = sub.add_parser("read", help="list annotations")
+    p.add_argument("pdf")
+    p.add_argument("--page", type=int)
+    p.add_argument("--author")
+    p.add_argument("--kind")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_read)
+
+    p = sub.add_parser("show", help="annotations with the covered text")
+    p.add_argument("pdf")
+    p.add_argument("--page", type=int)
+    p.add_argument("--author")
+    p.add_argument("--kind")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_show)
+
+    p = sub.add_parser("text", help="page text lines with coordinates")
+    p.add_argument("pdf")
+    p.add_argument("--page", type=int)
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_text)
+
+    p = sub.add_parser("baseline", help="text baseline at a position")
+    p.add_argument("pdf")
+    p.add_argument("--page", type=int, required=True)
+    p.add_argument("--x", type=float, required=True)
+    p.add_argument("--y", type=float, required=True)
+    p.set_defaults(func=cmd_baseline)
+
+    p = sub.add_parser("add-markup", help="add highlight/underline/strikeout over a rect")
+    p.add_argument("pdf")
+    p.add_argument("--kind", choices=["highlight", "underline", "strikeout"], required=True)
+    p.add_argument("--page", type=int, required=True)
+    p.add_argument("--rect", required=True, help="x0,y0,x1,y1 in PDF user space")
+    p.add_argument("--contents", default="")
+    p.add_argument("--author", default=None)
+    p.add_argument("--color", default=None)
+    p.add_argument("--opacity", type=float, default=None)
+    p.add_argument("--name", default=None)
+    p.add_argument("--output", default=None)
+    p.set_defaults(func=cmd_add_markup)
+
+    p = sub.add_parser("add-note", help="add a sticky note at a point")
+    p.add_argument("pdf")
+    p.add_argument("--page", type=int, required=True)
+    p.add_argument("--x", type=float, required=True)
+    p.add_argument("--y", type=float, required=True)
+    p.add_argument("--contents", default="")
+    p.add_argument("--author", default=None)
+    p.add_argument("--color", default=None)
+    p.add_argument("--opacity", type=float, default=None)
+    p.add_argument("--name", default=None)
+    p.add_argument("--output", default=None)
+    p.set_defaults(func=cmd_add_note)
+
+    p = sub.add_parser("add-caret", help="add an Acrobat Insert-Text caret (baseline-snapped)")
+    p.add_argument("pdf")
+    p.add_argument("--page", type=int, required=True)
+    p.add_argument("--x", type=float, required=True)
+    p.add_argument("--y", type=float, required=True, help="approximate; snapped to the text baseline")
+    p.add_argument("--contents", default="")
+    p.add_argument("--author", default=None)
+    p.add_argument("--color", default=None)
+    p.add_argument("--opacity", type=float, default=None)
+    p.add_argument("--name", default=None)
+    p.add_argument("--output", default=None)
+    p.set_defaults(func=cmd_add_caret)
+
+    p = sub.add_parser("update", help="update contents/author/color")
+    p.add_argument("pdf")
+    p.add_argument("--id", required=True, help="annotation object number (from read/show)")
+    p.add_argument("--contents", default=None)
+    p.add_argument("--author", default=None)
+    p.add_argument("--color", default=None)
+    p.add_argument("--opacity", type=float, default=None)
+    p.add_argument("--output", default=None)
+    p.set_defaults(func=cmd_update)
+
+    p = sub.add_parser("delete", help="delete an annotation")
+    p.add_argument("pdf")
+    p.add_argument("--id", required=True)
+    p.add_argument("--output", default=None)
+    p.set_defaults(func=cmd_delete)
+
+    p = sub.add_parser("move", help="move a note/caret to a new rect")
+    p.add_argument("pdf")
+    p.add_argument("--id", required=True)
+    p.add_argument("--rect", required=True, help="x0,y0,x1,y1 in PDF user space")
+    p.add_argument("--output", default=None)
+    p.set_defaults(func=cmd_move)
+
+    p = sub.add_parser("status", help="set Acrobat review state")
+    p.add_argument("pdf")
+    p.add_argument("--id", required=True)
+    p.add_argument("--status", choices=STATUS_STATES, required=True)
+    p.add_argument("--output", default=None)
+    p.set_defaults(func=cmd_status)
+
+    args = parser.parse_args()
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()

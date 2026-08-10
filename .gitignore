@@ -24,3 +24,7 @@ xcuserdata/
 *.p12
 *.cer
 *.provisionprofile
+
+# Python
+__pycache__/
+*.pyc

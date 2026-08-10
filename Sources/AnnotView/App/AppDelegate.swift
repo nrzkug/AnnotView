@@ -20,6 +20,8 @@ struct AnnotViewApp: App {
                 .keyboardShortcut("o", modifiers: .command)
             }
 
+            AnnotationUndoCommands(documentManager: model.documentManager)
+
             CommandGroup(after: .toolbar) {
                 Divider()
                 Button("Show or Hide Pages") {
@@ -69,6 +71,54 @@ struct AnnotViewApp: App {
             AppearanceSettingsView(settings: model.appearanceSettings)
                 .preferredColorScheme(model.appearanceSettings.appearance.colorScheme)
         }
+    }
+}
+
+private struct AnnotationUndoCommands: Commands {
+    @ObservedObject var documentManager: PDFDocumentManager
+
+    var body: some Commands {
+        CommandGroup(replacing: .undoRedo) {
+            Button(activeTextUndoManager == nil ? documentManager.undoAnnotationTitle : "Undo") {
+                if let undoManager = activeTextUndoManager {
+                    undoManager.undo()
+                    return
+                }
+                Task { await documentManager.undoAnnotationChange() }
+            }
+            .keyboardShortcut("z", modifiers: .command)
+            .disabled(documentManager.isSavingAnnotation || undoIsDisabled)
+
+            Button(activeTextUndoManager == nil ? documentManager.redoAnnotationTitle : "Redo") {
+                if let undoManager = activeTextUndoManager {
+                    undoManager.redo()
+                    return
+                }
+                Task { await documentManager.redoAnnotationChange() }
+            }
+            .keyboardShortcut("z", modifiers: [.command, .shift])
+            .disabled(documentManager.isSavingAnnotation || redoIsDisabled)
+        }
+    }
+
+    private var undoIsDisabled: Bool {
+        if let undoManager = activeTextUndoManager {
+            return !undoManager.canUndo
+        }
+        return !documentManager.canUndoAnnotationChange
+    }
+
+    private var redoIsDisabled: Bool {
+        if let undoManager = activeTextUndoManager {
+            return !undoManager.canRedo
+        }
+        return !documentManager.canRedoAnnotationChange
+    }
+
+    private var activeTextUndoManager: UndoManager? {
+        guard let textView = NSApp.keyWindow?.firstResponder as? NSTextView,
+              textView.isEditable else { return nil }
+        return textView.undoManager
     }
 }
 

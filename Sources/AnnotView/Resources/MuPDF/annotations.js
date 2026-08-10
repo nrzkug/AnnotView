@@ -17,6 +17,13 @@ function copyNumbers(value) {
     return result;
 }
 
+function transformPoint(point, matrix) {
+    return [
+        point[0] * matrix[0] + point[1] * matrix[2] + matrix[4],
+        point[0] * matrix[1] + point[1] * matrix[3] + matrix[5]
+    ];
+}
+
 function copyQuadPoints(annotation) {
     if (!annotation.hasQuadPoints()) return [];
     var source = annotation.getQuadPoints();
@@ -60,6 +67,7 @@ for (pageIndex = 0; pageIndex < document.countPages(); ++pageIndex) {
     var pageOutput = {
         pageIndex: pageIndex,
         pageTransform: copyNumbers(page.getTransform()),
+        pageBounds: copyNumbers(page.getBounds()),
         annotations: []
     };
     var annotations = page.getAnnotations();
@@ -69,11 +77,30 @@ for (pageIndex = 0; pageIndex < document.countPages(); ++pageIndex) {
         var annotation = annotations[annotationIndex];
         var object = annotation.getObject();
         var parent = object.get("IRT");
+        var type = annotation.getType();
+        var bounds = copyNumbers(annotation.getBounds());
+        if (type === "Caret" || type === "Text") {
+            // MuPDF's getBounds reports the caret's own 20x14 geometry and the
+            // sticky-note icon box rather than the annotation's real /Rect.
+            // Read /Rect (PDF user space) and report it in MuPDF page space so
+            // callers recover the actual rect.
+            var rectObject = object.get("Rect");
+            if (rectObject && rectObject.isArray && rectObject.isArray()) {
+                var rect = [Number(rectObject[0]), Number(rectObject[1]), Number(rectObject[2]), Number(rectObject[3])];
+                var caretInverse = mupdf.Matrix.invert(page.getTransform());
+                var p0 = transformPoint([rect[0], rect[1]], caretInverse);
+                var p1 = transformPoint([rect[2], rect[3]], caretInverse);
+                bounds = [
+                    Math.min(p0[0], p1[0]), Math.min(p0[1], p1[1]),
+                    Math.max(p0[0], p1[0]), Math.max(p0[1], p1[1])
+                ];
+            }
+        }
         pageOutput.annotations.push({
             sourceID: objectNumber(object),
             inReplyToSourceID: objectNumber(parent),
-            type: annotation.getType(),
-            bounds: copyNumbers(annotation.getBounds()),
+            type: type,
+            bounds: bounds,
             quadPoints: copyQuadPoints(annotation),
             contents: optionalString(annotation.getContents()),
             author: annotation.hasAuthor() ? optionalString(annotation.getAuthor()) : null,
