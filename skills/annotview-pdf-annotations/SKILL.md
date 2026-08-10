@@ -79,6 +79,7 @@ is the field an AI should base its analysis on.
 | `add-note <pdf> --page N --x X --y Y [--contents "…"]` | Sticky note at a point. |
 | `add-caret <pdf> --page N --x X --y Y [--contents "…"]` | Acrobat Insert-Text caret (baseline-snapped). |
 | `update <pdf> --id OBJ --contents "…" [--author X] [--color C]` | Edit contents/author/color. |
+| `move <pdf> --id OBJ --rect x0,y0,x1,y1 [--output out.pdf]` | Move a sticky note or caret to a new rect. |
 | `delete <pdf> --id OBJ` | Remove an annotation. |
 | `status <pdf> --id OBJ --status accepted\|rejected\|cancelled\|completed\|marked\|unmarked\|none` | Set Acrobat review state. |
 
