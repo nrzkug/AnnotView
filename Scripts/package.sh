@@ -41,15 +41,28 @@ echo "    all 4 scripts in sync"
 
 echo "==> Assembling $STAGING"
 rm -rf "$STAGING"
-mkdir -p "$STAGING/Contents/MacOS" "$STAGING/Contents/Resources"
+mkdir -p "$STAGING/Contents/MacOS" "$STAGING/Contents/Resources" "$STAGING/Contents/Frameworks"
 cp "$BIN_DIR/$APP_NAME" "$STAGING/Contents/MacOS/$APP_NAME"
 cp "AppBundle/Info.plist" "$STAGING/Contents/Info.plist"
-cp "AppBundle/$APP_NAME.icns" "$STAGING/Contents/Resources/$APP_NAME.icns"
+if [[ -f "AppBundle/$APP_NAME.icns" ]]; then
+  cp "AppBundle/$APP_NAME.icns" "$STAGING/Contents/Resources/$APP_NAME.icns"
+else
+  cp "AppBundle/AppIcon.png" "$STAGING/Contents/Resources/$APP_NAME.png"
+fi
 cp -R "$BUNDLE_SRC" "$STAGING/Contents/Resources/$BUNDLE_NAME"
 cp "annotool/annotool" "$STAGING/Contents/Resources/annotool"
 chmod +x "$STAGING/Contents/Resources/annotool"
 
+# SwiftPM keeps Sparkle alongside the executable. Copy its complete framework
+# (including the relaunch helper) into the app bundle before signing.
+if [[ -d "$BIN_DIR/Sparkle.framework" ]]; then
+  cp -R "$BIN_DIR/Sparkle.framework" "$STAGING/Contents/Frameworks/Sparkle.framework"
+fi
+
 echo "==> Signing (ad hoc)"
+if [[ -d "$STAGING/Contents/Frameworks/Sparkle.framework" ]]; then
+  codesign --force --sign - --timestamp=none "$STAGING/Contents/Frameworks/Sparkle.framework"
+fi
 codesign --force --sign - --timestamp=none "$STAGING"
 
 if [[ "$STAGE_ONLY" -eq 1 ]]; then

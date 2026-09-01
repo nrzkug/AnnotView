@@ -5,9 +5,15 @@ import Testing
 @testable import AnnotView
 
 private let acceptancePDFPath = ProcessInfo.processInfo.environment["ANNOTVIEW_TEST_PDF"]
-private let acceptanceMutoolIsAvailable = FileManager.default.isExecutableFile(
-    atPath: "/opt/homebrew/bin/mutool"
-) || FileManager.default.isExecutableFile(atPath: "/usr/local/bin/mutool")
+private let acceptanceMutoolIsAvailable = {
+    let environment = ProcessInfo.processInfo.environment
+    let candidates = [environment["MUTOOL_PATH"]]
+        + (environment["PATH"] ?? "").split(separator: ":").map { "\($0)/mutool" }
+        + ["/opt/homebrew/bin/mutool", "/usr/local/bin/mutool"]
+    return candidates.compactMap { $0 }.contains {
+        FileManager.default.isExecutableFile(atPath: $0)
+    }
+}()
 private let acceptanceTestsAreEnabled = acceptancePDFPath != nil && acceptanceMutoolIsAvailable
 
 struct AnnotationOverlayRendererTests {
@@ -175,6 +181,42 @@ struct AnnotationOverlayRendererTests {
 
 struct PDFDocumentManagerTests {
     @Test @MainActor
+    func multiSelectionNavigatesAndUpdatesStatusesAsOneBatch() async throws {
+        let first = Annotation(
+            sourceID: "101 0 R",
+            kind: .highlight,
+            pageIndex: 0,
+            bounds: CGRect(x: 10, y: 20, width: 30, height: 12)
+        )
+        let second = Annotation(
+            sourceID: "102 0 R",
+            kind: .note,
+            pageIndex: 1,
+            bounds: CGRect(x: 40, y: 50, width: 12, height: 12)
+        )
+        let updater = RecordingAnnotationStatusUpdater()
+        let manager = PDFDocumentManager(
+            annotationParser: FixedAnnotationParser(annotations: [first, second]),
+            annotationStatusUpdater: updater,
+            displayDocumentPreparer: EmptyDisplayDocumentPreparer(),
+            documentBuilder: EmptyDocumentBuilder()
+        )
+        await manager.open(url: URL(fileURLWithPath: "/tmp/multi-select.pdf"))
+
+        manager.selectAnnotations([first.id, second.id])
+        #expect(manager.selectedAnnotationIDs == [first.id, second.id])
+        #expect(manager.selectedAnnotationID == first.id)
+
+        await manager.updateStatus(of: manager.annotations, to: .completed)
+
+        #expect(manager.annotations.allSatisfy { $0.status == .completed })
+        let updates = await updater.recordedUpdates()
+        #expect(updates.count == 2)
+        #expect(Set(updates.map(\.sourceID)) == ["101 0 R", "102 0 R"])
+        #expect(updates.allSatisfy { $0.status == .completed })
+    }
+
+    @Test @MainActor
     func repeatedAnnotationNavigationCreatesFreshFeedbackRequests() {
         let manager = PDFDocumentManager()
         let annotation = Annotation(
@@ -198,6 +240,33 @@ struct PDFDocumentManagerTests {
 
         manager.goTo(annotation: annotation)
         #expect(manager.annotationNavigationID == 2)
+    }
+
+    @Test @MainActor
+    func editRequestCollapsesMultiSelectionAndOpensTheEditor() {
+        let manager = PDFDocumentManager()
+        let first = Annotation(
+            kind: .highlight,
+            pageIndex: 0,
+            bounds: CGRect(x: 10, y: 20, width: 30, height: 12)
+        )
+        let second = Annotation(
+            kind: .note,
+            pageIndex: 0,
+            bounds: CGRect(x: 50, y: 60, width: 12, height: 12)
+        )
+        manager.goTo(annotation: first)
+        manager.goTo(annotation: second, preservingMultipleSelection: true)
+        #expect(manager.selectedAnnotationIDs == [first.id, second.id])
+
+        manager.edit(annotation: first)
+
+        #expect(manager.selectedAnnotationIDs == [first.id])
+        #expect(manager.focusedAnnotation?.id == first.id)
+        #expect(AnnotationPresentationPolicy.action(
+            for: first,
+            request: manager.annotationPresentationRequest
+        ) == .editor)
     }
 
     @Test @MainActor
@@ -225,6 +294,33 @@ struct PDFDocumentManagerTests {
         manager.deselectAnnotation()
         #expect(manager.selectedAnnotationID == nil)
         #expect(manager.focusedAnnotation?.id == annotation.id)
+    }
+
+    @Test @MainActor
+    func failedMoveRestoresTheOptimisticAnnotationPosition() async {
+        let original = Annotation(
+            sourceID: "annotation-1",
+            kind: .note,
+            pageIndex: 0,
+            bounds: CGRect(x: 10, y: 20, width: 16, height: 16)
+        )
+        let manager = PDFDocumentManager(
+            annotationParser: FixedAnnotationParser(annotations: [original]),
+            annotationWriter: FailingAnnotationWriter(),
+            displayDocumentPreparer: EmptyDisplayDocumentPreparer(),
+            documentBuilder: EmptyDocumentBuilder()
+        )
+        await manager.open(url: URL(fileURLWithPath: "/tmp/test.pdf"))
+        manager.goTo(annotation: original)
+
+        let moved = await manager.move(
+            original,
+            to: CGRect(x: 100, y: 200, width: 16, height: 16)
+        )
+
+        #expect(!moved)
+        #expect(manager.annotations.first?.bounds == original.bounds)
+        #expect(manager.focusedAnnotation?.bounds == original.bounds)
     }
 
     @Test(.enabled(
@@ -272,6 +368,46 @@ struct PDFDocumentManagerTests {
         let preview = try manager.renderPage(pageIndex: 0, scale: 0.2)
         #expect(preview.size.width > 0)
         #expect(preview.size.height > 0)
+    }
+}
+
+private struct FixedAnnotationParser: AnnotationParsing {
+    let annotations: [Annotation]
+
+    func annotations(in documentURL: URL) async throws -> [Annotation] {
+        annotations
+    }
+}
+
+private actor FailingAnnotationWriter: AnnotationWriting {
+    enum Failure: Error { case writeFailed }
+
+    func perform(_ mutations: [AnnotationMutation], in documentURL: URL) async throws {
+        throw Failure.writeFailed
+    }
+}
+
+private actor RecordingAnnotationStatusUpdater: AnnotationStatusUpdating {
+    private var updates: [AnnotationStatusUpdate] = []
+
+    func updateStatuses(
+        in documentURL: URL,
+        updates: [AnnotationStatusUpdate]
+    ) async throws {
+        self.updates = updates
+    }
+
+    func recordedUpdates() -> [AnnotationStatusUpdate] { updates }
+}
+
+private struct EmptyDisplayDocumentPreparer: PDFDisplayDocumentPreparing {
+    func displayData(for documentURL: URL) async throws -> Data { Data() }
+}
+
+@MainActor
+private struct EmptyDocumentBuilder: PDFDocumentBuilding {
+    func build(from data: Data) -> LoadedPDFDocument? {
+        LoadedPDFDocument(document: PDFDocument(), outlineItems: [])
     }
 }
 

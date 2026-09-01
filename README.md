@@ -16,6 +16,7 @@ Built with SwiftUI, AppKit, and PDFKit, AnnotView focuses on reading papers and 
 - Shows annotation authors, dates, comments, replies, and colors.
 - Creates and edits Acrobat-compatible highlights, underlines, strikethroughs, sticky notes, and insert-text markers.
 - Supports Acrobat review states: Accepted, Rejected, Cancelled, and Completed.
+- Supports Command/Shift multi-selection and batch review-state updates.
 - Provides comment copying, annotation navigation, and document search.
 - Ships an `annotool` CLI for reading and writing Acrobat annotations from a terminal or AI agent.
 
@@ -35,6 +36,18 @@ AnnotView looks for `mutool` in `MUTOOL_PATH`, the app bundle, common Homebrew l
 ## Install a release
 
 Download the macOS ZIP from Releases, unzip it, and move `AnnotView.app` to Applications. The app is ad-hoc signed, so macOS may block its first launch. Control-click the app and choose **Open**, or allow it in **System Settings → Privacy & Security**.
+
+## Updates
+
+Choose **AnnotView → Check for Updates…** to check the signed release feed and
+install a newer version. AnnotView also checks automatically; downloaded
+updates always require confirmation before installation.
+
+For a release, ZIP the staged app and regenerate `appcast.xml` with Sparkle's
+`generate_appcast` tool. The tool adds Sparkle's EdDSA signature for the update
+archive; this is separate from the app bundle's current ad-hoc code signature.
+Commit the regenerated feed to the default branch before publishing the
+release; it is served from GitHub over HTTPS.
 
 ## Run and build
 

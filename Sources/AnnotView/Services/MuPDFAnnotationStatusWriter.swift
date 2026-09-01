@@ -29,11 +29,22 @@ actor MuPDFAnnotationStatusWriter: AnnotationStatusUpdating {
         self.scriptURL = scriptURL
     }
 
-    func updateStatus(
+    private struct StatusPayload: Encodable {
+        struct Update: Encodable {
+            let sourceID: String
+            let stateModel: String
+            let state: String
+        }
+
+        let version = 1
+        let updates: [Update]
+    }
+
+    func updateStatuses(
         in documentURL: URL,
-        sourceID: String,
-        status: Annotation.Status
+        updates: [AnnotationStatusUpdate]
     ) async throws {
+        guard !updates.isEmpty else { return }
         let script = try scriptURL ?? Self.findScript()
         let temporaryDirectory = FileManager.default.temporaryDirectory
             .appendingPathComponent("AnnotView-\(UUID().uuidString)", isDirectory: true)
@@ -41,13 +52,19 @@ actor MuPDFAnnotationStatusWriter: AnnotationStatusUpdating {
         defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
 
         let outputURL = temporaryDirectory.appendingPathComponent("updated.pdf")
+        let payloadURL = temporaryDirectory.appendingPathComponent("statuses.json")
+        let payload = StatusPayload(updates: updates.map {
+            StatusPayload.Update(
+                sourceID: $0.sourceID,
+                stateModel: $0.status.stateModel,
+                state: $0.status.pdfStateName
+            )
+        })
+        try JSONEncoder().encode(payload).write(to: payloadURL, options: .atomic)
         do {
             _ = try await tool.run(
                 script: script,
-                arguments: [
-                    documentURL.path, outputURL.path, sourceID,
-                    status.stateModel, status.pdfStateName
-                ]
+                arguments: [documentURL.path, outputURL.path, payloadURL.path]
             )
         } catch MuPDFTool.ToolError.executableNotFound {
             throw WriterError.executableNotFound

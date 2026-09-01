@@ -22,6 +22,14 @@
 	<string>0.2.0</string>
 	<key>CFBundleVersion</key>
 	<string>3</string>
+    <key>SUFeedURL</key>
+    <string>https://raw.githubusercontent.com/nrzkug/AnnotView/main/appcast.xml</string>
+    <key>SUPublicEDKey</key>
+    <string>vXxOTtSqMtVN5XLiqaChnZ+3A3GyrovIQKyTpwYCpxg=</string>
+    <key>SUEnableAutomaticChecks</key>
+    <true/>
+    <key>SUAutomaticallyUpdate</key>
+    <false/>
     <key>LSMinimumSystemVersion</key>
     <string>26.0</string>
     <key>NSHighResolutionCapable</key>

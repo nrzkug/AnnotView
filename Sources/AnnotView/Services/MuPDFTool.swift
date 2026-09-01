@@ -31,18 +31,35 @@ struct MuPDFTool: Sendable {
             process.standardError = errors
 
             try process.run()
-            let outputData = output?.fileHandleForReading.readDataToEndOfFile() ?? Data()
-            let errorData = errors.fileHandleForReading.readDataToEndOfFile()
-            process.waitUntilExit()
+            let streams = await withTaskGroup(of: (isStandardOutput: Bool, data: Data).self) { group in
+                group.addTask {
+                    (true, output?.fileHandleForReading.readDataToEndOfFile() ?? Data())
+                }
+                group.addTask {
+                    (false, errors.fileHandleForReading.readDataToEndOfFile())
+                }
+
+                process.waitUntilExit()
+                var standardOutput = Data()
+                var standardError = Data()
+                for await stream in group {
+                    if stream.isStandardOutput {
+                        standardOutput = stream.data
+                    } else {
+                        standardError = stream.data
+                    }
+                }
+                return (standardOutput, standardError)
+            }
 
             guard process.terminationStatus == 0 else {
-                let rawMessage = String(data: errorData, encoding: .utf8) ?? "Unknown MuPDF error"
+                let rawMessage = String(data: streams.1, encoding: .utf8) ?? "Unknown MuPDF error"
                 throw ToolError.processFailed(
                     status: process.terminationStatus,
                     message: rawMessage.trimmingCharacters(in: .whitespacesAndNewlines)
                 )
             }
-            return outputData
+            return streams.0
         }.value
     }
 

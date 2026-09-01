@@ -63,21 +63,28 @@ final class CLIInstaller: ObservableObject {
     }
 
     private func refreshPathStatus() async {
+        let isOnPath = await Task.detached(priority: .utility) {
+            Self.commandIsOnPath()
+        }.value
+        binOnPath = isOnPath
+    }
+
+    private nonisolated static func commandIsOnPath() -> Bool {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/zsh")
-        process.arguments = ["-l", "-ic", "command -v annotool"]
+        process.arguments = ["-l", "-c", "command -v annotool"]
         let pipe = Pipe()
         process.standardOutput = pipe
-        process.standardError = Pipe()
+        process.standardError = FileHandle.nullDevice
         do {
             try process.run()
             process.waitUntilExit()
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            binOnPath = !String(data: data, encoding: .utf8)!
+            let command = (String(data: data, encoding: .utf8) ?? "")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-                .isEmpty
+            return !command.isEmpty
         } catch {
-            binOnPath = false
+            return false
         }
     }
 

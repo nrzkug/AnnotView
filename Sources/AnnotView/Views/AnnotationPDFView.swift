@@ -21,6 +21,8 @@ final class AnnotationPDFView: PDFView, @preconcurrency PDFPageOverlayViewProvid
     private var contextMenuAnnotation: Annotation?
     private var contextMenuPagePoint: PDFPagePoint?
     private var mouseTrackingArea: NSTrackingArea?
+    private weak var observedClipView: NSClipView?
+    private var scrollObserver: NSObjectProtocol?
     private var dragState: (annotation: Annotation, page: PDFPage, startViewPoint: CGPoint, startBounds: CGRect)?
     private let pageOverlayViews = NSHashTable<AnnotationPageOverlayView>.weakObjects()
 
@@ -60,6 +62,32 @@ final class AnnotationPDFView: PDFView, @preconcurrency PDFPageOverlayViewProvid
     func resetAnnotationInteraction() {
         interactionController.reset()
         popoverCoordinator.reset()
+    }
+
+    func stopObservingDocumentScrolling() {
+        if let scrollObserver { NotificationCenter.default.removeObserver(scrollObserver) }
+        scrollObserver = nil
+        observedClipView = nil
+    }
+
+    func observeDocumentScrolling() {
+        guard let clipView = documentView?.enclosingScrollView?.contentView,
+              observedClipView !== clipView else { return }
+        if let scrollObserver { NotificationCenter.default.removeObserver(scrollObserver) }
+        observedClipView = clipView
+        clipView.postsBoundsChangedNotifications = true
+        scrollObserver = NotificationCenter.default.addObserver(
+            forName: NSView.boundsDidChangeNotification,
+            object: clipView,
+            queue: .main
+        ) { [weak self] _ in
+            // PDFKit updates the clip view before this notification.  Re-showing
+            // an already-visible popover updates its anchor without recreating
+            // the preview or losing its pinned/editor state.
+            Task { @MainActor [weak self] in
+                self?.popoverCoordinator.reposition()
+            }
+        }
     }
 
     func pdfView(_ view: PDFView, overlayViewFor page: PDFPage) -> NSView? {

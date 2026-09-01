@@ -1,4 +1,5 @@
 import AppKit
+import Sparkle
 import SwiftUI
 
 @main
@@ -29,6 +30,12 @@ struct AnnotViewApp: App {
                 }
                 Button("Show or Hide Annotations") {
                     model.chromeState.inspectorIsPresented.toggle()
+                }
+            }
+
+            CommandGroup(after: .appInfo) {
+                Button("Check for Updates…") {
+                    model.checkForUpdates()
                 }
             }
 
@@ -147,6 +154,11 @@ final class AnnotViewApplicationModel {
     let documentManager = PDFDocumentManager()
     let chromeState = ReaderChromeState()
     let appearanceSettings = AppearanceSettings()
+    private let updaterController = SPUStandardUpdaterController(
+        startingUpdater: false,
+        updaterDelegate: nil,
+        userDriverDelegate: nil
+    )
 
     private var initialDocumentFlowStarted = false
     private var receivedExternalDocument = false
@@ -157,6 +169,14 @@ final class AnnotViewApplicationModel {
 
     func openDocument() {
         Task { await documentManager.presentOpenPanel() }
+    }
+
+    func checkForUpdates() {
+        updaterController.checkForUpdates(nil)
+    }
+
+    func startUpdater() {
+        updaterController.startUpdater()
     }
 
     func hideReaderWindowForInitialOpen() {
@@ -240,6 +260,7 @@ final class AnnotViewAppDelegate: NSObject, NSApplicationDelegate {
         model.hideReaderWindowForInitialOpen()
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
+        model.startUpdater()
         Task { @MainActor in
             defer {
                 ProcessInfo.processInfo.enableAutomaticTermination(automaticTerminationReason)

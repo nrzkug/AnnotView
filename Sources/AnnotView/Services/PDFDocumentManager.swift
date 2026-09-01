@@ -58,7 +58,9 @@ final class PDFDocumentManager: ObservableObject {
     @Published private(set) var isLoadingAnnotations = false
     @Published private(set) var focusedAnnotation: Annotation?
     @Published private(set) var annotationNavigationID = 0
+    @Published private(set) var annotationPresentationRequest: AnnotationPresentationRequest = .sidebarNavigation
     @Published private(set) var selectedAnnotationID: UUID?
+    @Published private(set) var selectedAnnotationIDs: Set<UUID> = []
     @Published private(set) var zoomRequestID = 0
     @Published private(set) var zoomAction: ZoomAction = .fitPage
     @Published private(set) var recentDocuments: [URL] = []
@@ -164,7 +166,9 @@ final class PDFDocumentManager: ObservableObject {
         annotations = []
         renderedPageCache.removeAllObjects()
         focusedAnnotation = nil
+        annotationPresentationRequest = .sidebarNavigation
         selectedAnnotationID = nil
+        selectedAnnotationIDs = []
         clearAnnotationHistory()
         searchController.reset()
         selectedPageIndex = 0
@@ -192,18 +196,66 @@ final class PDFDocumentManager: ObservableObject {
         annotations.filter { $0.pageIndex == pageIndex }
     }
 
-    func goTo(annotation: Annotation) {
+    func goTo(annotation: Annotation, preservingMultipleSelection: Bool = false) {
         focusedAnnotation = annotation
+        annotationPresentationRequest = .sidebarNavigation
         selectedAnnotationID = annotation.id
+        if preservingMultipleSelection {
+            selectedAnnotationIDs.insert(annotation.id)
+        } else {
+            selectedAnnotationIDs = [annotation.id]
+        }
         annotationNavigationID += 1
     }
 
     func selectAnnotation(_ id: UUID?) {
         selectedAnnotationID = id
+        selectedAnnotationIDs = id.map { Set([$0]) } ?? []
+    }
+
+    func selectAnnotations(_ ids: Set<UUID>) {
+        let availableIDs = Set(annotations.map(\.id))
+        let selection = ids.intersection(availableIDs)
+        let previousSelection = selectedAnnotationIDs
+        selectedAnnotationIDs = selection
+
+        guard !selection.isEmpty else {
+            selectedAnnotationID = nil
+            return
+        }
+
+        let newlySelected = selection.subtracting(previousSelection)
+        let nextID = annotations.first(where: { newlySelected.contains($0.id) })?.id
+            ?? selectedAnnotationID.flatMap { selection.contains($0) ? $0 : nil }
+            ?? annotations.first(where: { selection.contains($0.id) })?.id
+        guard let nextID,
+              let annotation = annotations.first(where: { $0.id == nextID }) else { return }
+        focusedAnnotation = annotation
+        annotationPresentationRequest = .sidebarNavigation
+        selectedAnnotationID = nextID
+        annotationNavigationID += 1
+    }
+
+    func edit(annotation: Annotation) {
+        focusedAnnotation = annotation
+        annotationPresentationRequest = .explicitEdit
+        selectedAnnotationID = annotation.id
+        selectedAnnotationIDs = [annotation.id]
+        annotationNavigationID += 1
+    }
+
+    func retainSelectedAnnotations(_ ids: Set<UUID>) {
+        let retained = selectedAnnotationIDs.intersection(ids)
+        guard retained != selectedAnnotationIDs else { return }
+        selectedAnnotationIDs = retained
+        if let selectedAnnotationID, !retained.contains(selectedAnnotationID) {
+            self.selectedAnnotationID = annotations.first(where: { retained.contains($0.id) })?.id
+        }
     }
 
     func deselectAnnotation() {
         selectedAnnotationID = nil
+        selectedAnnotationIDs = []
     }
 
     func move(_ annotation: Annotation, to bounds: CGRect) async -> Bool {
@@ -214,6 +266,7 @@ final class PDFDocumentManager: ObservableObject {
         defer { isSavingAnnotation = false }
         // Optimistically move the in-memory annotation so the overlay does not
         // snap back to the old position while the PDF is being rewritten.
+        let originalAnnotation = annotations.first(where: { $0.id == annotation.id })
         if let index = annotations.firstIndex(where: { $0.id == annotation.id }) {
             var moved = annotations[index]
             moved.bounds = bounds
@@ -237,30 +290,58 @@ final class PDFDocumentManager: ObservableObject {
             }
             return true
         } catch {
+            // The write did not reach disk. Restore the optimistic state so the
+            // overlay continues to reflect the document the user actually has.
+            if let originalAnnotation,
+               let index = annotations.firstIndex(where: { $0.id == annotation.id }) {
+                annotations[index] = originalAnnotation
+                if focusedAnnotation?.id == annotation.id {
+                    focusedAnnotation = originalAnnotation
+                }
+            }
             errorMessage = "Annotation could not be moved: \(error.localizedDescription)"
             return false
         }
     }
 
     func updateStatus(of annotation: Annotation, to status: Annotation.Status) async {
-        guard status != annotation.status,
-              let documentURL,
-              let sourceID = annotation.statusTargetSourceID else { return }
-        updatingAnnotationIDs.insert(annotation.id)
-        defer { updatingAnnotationIDs.remove(annotation.id) }
+        await updateStatus(of: [annotation], to: status)
+    }
+
+    func updateStatus(of selectedAnnotations: [Annotation], to status: Annotation.Status) async {
+        guard let documentURL else { return }
+        let candidates = selectedAnnotations.filter {
+            $0.status != status
+                && $0.statusTargetSourceID != nil
+                && !updatingAnnotationIDs.contains($0.id)
+        }
+        guard !candidates.isEmpty else { return }
+
+        let candidateIDs = Set(candidates.map(\.id))
+        updatingAnnotationIDs.formUnion(candidateIDs)
+        defer { updatingAnnotationIDs.subtract(candidateIDs) }
+
+        var seenSourceIDs = Set<String>()
+        let updates = candidates.compactMap { annotation -> AnnotationStatusUpdate? in
+            guard let sourceID = annotation.statusTargetSourceID,
+                  seenSourceIDs.insert(sourceID).inserted else { return nil }
+            return AnnotationStatusUpdate(sourceID: sourceID, status: status)
+        }
         do {
-            try await annotationStatusUpdater.updateStatus(
+            try await annotationStatusUpdater.updateStatuses(
                 in: documentURL,
-                sourceID: sourceID,
-                status: status
+                updates: updates
             )
-            guard let index = annotations.firstIndex(where: { $0.id == annotation.id }) else { return }
-            annotations[index].status = status
-            if focusedAnnotation?.id == annotation.id {
-                focusedAnnotation = annotations[index]
+            for index in annotations.indices where candidateIDs.contains(annotations[index].id) {
+                annotations[index].status = status
+                if focusedAnnotation?.id == annotations[index].id {
+                    focusedAnnotation = annotations[index]
+                }
             }
         } catch {
-            errorMessage = "Annotation status could not be updated: \(error.localizedDescription)"
+            errorMessage = candidates.count == 1
+                ? "Annotation status could not be updated: \(error.localizedDescription)"
+                : "Annotation statuses could not be updated: \(error.localizedDescription)"
         }
     }
 
@@ -400,8 +481,22 @@ final class PDFDocumentManager: ObservableObject {
     }
 
     func deleteAnnotation(_ annotation: Annotation) async -> Bool {
-        guard let sourceID = annotation.sourceID else { return false }
-        return await deleteAnnotations([annotation], sourceIDs: [sourceID], recordsHistory: true)
+        await deleteAnnotations([annotation])
+    }
+
+    func deleteAnnotations(_ selectedAnnotations: [Annotation]) async -> Bool {
+        var seenSourceIDs = Set<String>()
+        let deletable = selectedAnnotations.filter { annotation in
+            guard let sourceID = annotation.sourceID else { return false }
+            return seenSourceIDs.insert(sourceID).inserted
+        }
+        let sourceIDs = deletable.compactMap(\.sourceID)
+        guard !sourceIDs.isEmpty else { return false }
+        return await deleteAnnotations(
+            deletable,
+            sourceIDs: sourceIDs,
+            recordsHistory: true
+        )
     }
 
     func undoAnnotationChange() async {
@@ -449,7 +544,7 @@ final class PDFDocumentManager: ObservableObject {
     private func refreshAnnotations(excluding existingSourceIDs: Set<String> = []) async throws -> [Annotation] {
         guard let documentURL else { return [] }
         let parsed = try await annotationParser.annotations(in: documentURL)
-        annotations = parsed
+        replaceAnnotationsPreservingSelection(with: parsed)
         return parsed.filter {
             guard let sourceID = $0.sourceID else { return false }
             return !existingSourceIDs.contains(sourceID)
@@ -594,6 +689,27 @@ final class PDFDocumentManager: ObservableObject {
         updateAnnotationHistoryAvailability()
     }
 
+    private func replaceAnnotationsPreservingSelection(with replacements: [Annotation]) {
+        let selectedSourceIDs = Set(annotations.lazy
+            .filter { self.selectedAnnotationIDs.contains($0.id) }
+            .compactMap(\.sourceID))
+        let primarySourceID = annotations.first(where: { $0.id == selectedAnnotationID })?.sourceID
+        let focusedSourceID = focusedAnnotation?.sourceID
+
+        annotations = replacements
+        selectedAnnotationIDs = Set(replacements.lazy
+            .filter { annotation in
+                annotation.sourceID.map(selectedSourceIDs.contains) == true
+            }
+            .map(\.id))
+        selectedAnnotationID = primarySourceID.flatMap { sourceID in
+            replacements.first(where: { $0.sourceID == sourceID })?.id
+        } ?? replacements.first(where: { selectedAnnotationIDs.contains($0.id) })?.id
+        if let focusedSourceID {
+            focusedAnnotation = replacements.first(where: { $0.sourceID == focusedSourceID })
+        }
+    }
+
     private func clearAnnotationHistory() {
         annotationUndoHistory.removeAll()
         annotationRedoHistory.removeAll()
@@ -674,7 +790,7 @@ final class PDFDocumentManager: ObservableObject {
         do {
             let parsed = try await annotationParser.annotations(in: documentURL)
             guard annotationLoadID == id else { return }
-            annotations = parsed
+            replaceAnnotationsPreservingSelection(with: parsed)
         } catch {
             guard annotationLoadID == id else { return }
             errorMessage = "Annotations could not be loaded: \(error.localizedDescription)"

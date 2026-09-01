@@ -145,6 +145,7 @@ struct ContentView: View {
                 annotations: documentManager.annotations,
                 focusedAnnotation: documentManager.focusedAnnotation,
                 annotationNavigationID: documentManager.annotationNavigationID,
+                annotationPresentationRequest: documentManager.annotationPresentationRequest,
                 selectedAnnotationID: documentManager.selectedAnnotationID,
                 onSelectAnnotationRequest: { id in
                     documentManager.selectAnnotation(id)

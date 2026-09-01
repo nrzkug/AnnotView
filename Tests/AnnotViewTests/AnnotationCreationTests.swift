@@ -3,8 +3,17 @@ import PDFKit
 import Testing
 @testable import AnnotView
 
-private let mutoolIsAvailable = FileManager.default.isExecutableFile(atPath: "/opt/homebrew/bin/mutool")
-    || FileManager.default.isExecutableFile(atPath: "/usr/local/bin/mutool")
+private let mutoolIsAvailable = mutoolURL != nil
+
+private var mutoolURL: URL? {
+    let environment = ProcessInfo.processInfo.environment
+    let candidates = [environment["MUTOOL_PATH"]]
+        + (environment["PATH"] ?? "").split(separator: ":").map { "\($0)/mutool" }
+        + ["/opt/homebrew/bin/mutool", "/usr/local/bin/mutool"]
+    return candidates.compactMap { $0 }.map(URL.init(fileURLWithPath:)).first {
+        FileManager.default.isExecutableFile(atPath: $0.path)
+    }
+}
 
 struct AnnotationCreationTests {
     @Test func editingColorPreservesAnnotationOpacity() {
@@ -154,6 +163,46 @@ struct AnnotationCreationTests {
         #expect(caret.contents == "Inserted sentence here")
         #expect(caret.author == "Reviewer")
         #expect(caret.bounds.width > 0 && caret.bounds.height > 0)
+    }
+
+    @Test(.enabled(if: mutoolIsAvailable, "Requires the mutool executable")) @MainActor
+    func updatesMultipleAnnotationStatusesInOneSave() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("AnnotViewBatchStatusTest-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let documentURL = directory.appendingPathComponent("batch-status.pdf")
+        try writeBlankPDF(to: documentURL)
+        let writer = MuPDFAnnotationWriter()
+        for x in [120.0, 220.0] {
+            try await writer.createNote(
+                in: documentURL,
+                location: PDFPagePoint(pageIndex: 0, point: CGPoint(x: x, y: 300)),
+                contents: "Review \(Int(x))",
+                author: "Reviewer",
+                color: .yellow,
+                createdAt: Date()
+            )
+        }
+
+        let parser = MuPDFAnnotationParser()
+        let annotations = try await parser.annotations(in: documentURL)
+        #expect(annotations.count == 2)
+        let updates = try annotations.map {
+            AnnotationStatusUpdate(
+                sourceID: try #require($0.statusTargetSourceID),
+                status: .completed
+            )
+        }
+        try await MuPDFAnnotationStatusWriter().updateStatuses(
+            in: documentURL,
+            updates: updates
+        )
+
+        let updated = try await parser.annotations(in: documentURL)
+        #expect(updated.count == 2)
+        #expect(updated.allSatisfy { $0.status == .completed })
     }
 
     @Test(.enabled(if: mutoolIsAvailable, "Requires the mutool executable")) @MainActor

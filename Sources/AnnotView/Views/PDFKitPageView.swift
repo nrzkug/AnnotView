@@ -6,6 +6,7 @@ struct PDFKitPageView: NSViewRepresentable {
     let annotations: [Annotation]
     let focusedAnnotation: Annotation?
     let annotationNavigationID: Int
+    let annotationPresentationRequest: AnnotationPresentationRequest
     let selectedAnnotationID: UUID?
     let onSelectAnnotationRequest: @MainActor (UUID) -> Void
     let onDeselectAnnotationRequest: @MainActor () -> Void
@@ -56,6 +57,7 @@ struct PDFKitPageView: NSViewRepresentable {
             }
         }
         view.overlayAnnotations = Dictionary(grouping: annotations, by: \.pageIndex)
+        view.observeDocumentScrolling()
         view.highlightedSelections = searchResults
         view.selectedAnnotationID = selectedAnnotationID
         view.onSelectAnnotationRequest = onSelectAnnotationRequest
@@ -98,7 +100,7 @@ struct PDFKitPageView: NSViewRepresentable {
                 view.handleAnnotationPresentation(
                     focusedAnnotation,
                     on: targetPage,
-                    request: .sidebarNavigation
+                    request: annotationPresentationRequest
                 )
             }
         }
@@ -113,6 +115,7 @@ struct PDFKitPageView: NSViewRepresentable {
 
     static func dismantleNSView(_ view: AnnotationPDFView, coordinator: Coordinator) {
         view.resetAnnotationInteraction()
+        view.stopObservingDocumentScrolling()
         coordinator.stopObserving()
     }
 

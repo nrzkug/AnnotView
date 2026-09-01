@@ -29,6 +29,8 @@ final class AnnotationPopoverCoordinator: NSObject, NSPopoverDelegate {
     private var pendingShow: PendingShow?
     private var isClosing = false
     private var hoverDismissTask: Task<Void, Never>?
+    private var positionedAnnotation: Annotation?
+    private weak var positionedPage: PDFPage?
 
     private struct PendingShow {
         let popover: NSPopover
@@ -209,7 +211,7 @@ final class AnnotationPopoverCoordinator: NSObject, NSPopoverDelegate {
         annotation: Annotation,
         page: PDFPage
     ) {
-        guard let hostView else { return }
+        guard hostView != nil else { return }
         if popover?.isShown == true || pendingShow != nil {
             // A popover is shown or already closing; queue the replacement and
             // let popoverDidClose show it once the close animation completes.
@@ -236,9 +238,21 @@ final class AnnotationPopoverCoordinator: NSObject, NSPopoverDelegate {
         newPopover.show(relativeTo: anchor, of: hostView, preferredEdge: .maxX)
         popover = newPopover
         activePopover = state
+        positionedAnnotation = annotation
+        positionedPage = page
         if case .preview(pinned: false) = state.kind {
             monitorHoverPreview(for: state.annotationID)
         }
+    }
+
+    /// Keep an open preview attached to its annotation as PDFKit scrolls.
+    func reposition() {
+        guard let popover, popover.isShown,
+              let hostView,
+              let annotation = positionedAnnotation,
+              let page = positionedPage else { return }
+        let anchor = hostView.convert(AnnotationOverlayRenderer.anchorBounds(for: annotation), from: page)
+        popover.show(relativeTo: anchor, of: hostView, preferredEdge: .maxX)
     }
 
     func dismiss() {
@@ -253,6 +267,8 @@ final class AnnotationPopoverCoordinator: NSObject, NSPopoverDelegate {
         let closingPopover = popover
         popover = nil
         activePopover = nil
+        positionedAnnotation = nil
+        positionedPage = nil
         if closingPopover != nil { isClosing = true }
         closingPopover?.close()
     }

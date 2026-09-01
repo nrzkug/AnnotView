@@ -45,7 +45,6 @@ struct AppearanceSettingsView: View {
         .onAppear { cliInstaller.refresh() }
     }
 
-
     @ViewBuilder
     private func actionButton(
         isWorking: Bool,

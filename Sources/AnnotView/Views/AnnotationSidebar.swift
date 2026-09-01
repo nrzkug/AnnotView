@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 struct AnnotationSidebar: View {
@@ -48,22 +49,17 @@ struct AnnotationSidebar: View {
                 }
             }
         }
+        .onChange(of: visibleAnnotationIDs) { _, ids in
+            documentManager.retainSelectedAnnotations(ids)
+        }
     }
 
     /// Native macOS list selection: the system draws the highlight and
     /// keyboard arrows move between annotations, each selection navigating.
-    private var annotationSelectionBinding: Binding<UUID?> {
+    private var annotationSelectionBinding: Binding<Set<UUID>> {
         Binding(
-            get: { documentManager.selectedAnnotationID },
-            set: { newValue in
-                guard let newValue else {
-                    documentManager.deselectAnnotation()
-                    return
-                }
-                if let annotation = documentManager.annotations.first(where: { $0.id == newValue }) {
-                    documentManager.goTo(annotation: annotation)
-                }
-            }
+            get: { documentManager.selectedAnnotationIDs.intersection(visibleAnnotationIDs) },
+            set: documentManager.selectAnnotations
         )
     }
 
@@ -121,6 +117,10 @@ struct AnnotationSidebar: View {
             .map { AnnotationThread(root: $0, replies: []) }
     }
 
+    private var visibleAnnotationIDs: Set<UUID> {
+        Set(threads.flatMap { [$0.root.id] + $0.replies.map(\.id) })
+    }
+
     private var pageGroups: [AnnotationPageGroup] {
         Dictionary(grouping: threads, by: { $0.root.pageIndex })
             .map { AnnotationPageGroup(pageIndex: $0.key, threads: $0.value) }
@@ -166,6 +166,45 @@ private struct AnnotationListItem: View {
         .padding(.vertical, 2)
         .frame(maxWidth: .infinity, alignment: .leading)
         .tag(annotation.id)
+        .contextMenu {
+            if contextTargets.count == 1 {
+                Button("Copy", systemImage: "doc.on.doc") {
+                    copyComment()
+                }
+                .disabled(commentText == nil)
+
+                Button("Edit…", systemImage: "pencil") {
+                    documentManager.edit(annotation: annotation)
+                }
+
+                Divider()
+            }
+
+            Button(
+                contextTargets.count == 1 ? "Delete" : "Delete \(contextTargets.count) Annotations",
+                systemImage: "trash",
+                role: .destructive
+            ) {
+                let targets = contextTargets
+                Task { await documentManager.deleteAnnotations(targets) }
+            }
+            .disabled(deleteIsInProgress)
+
+            Divider()
+
+            Menu("Set Status") {
+                statusActions
+            }
+            .disabled(statusUpdateIsInProgress)
+        }
+        // List does not write its selection binding when the user clicks the
+        // already-selected row.  Treat that click as an explicit navigation so
+        // a dismissed preview is restored and the PDF returns to the comment.
+        .onTapGesture {
+            if documentManager.selectedAnnotationIDs.contains(annotation.id) {
+                documentManager.goTo(annotation: annotation, preservingMultipleSelection: true)
+            }
+        }
     }
 
     private var metadataLine: String {
@@ -178,17 +217,7 @@ private struct AnnotationListItem: View {
 
     private var statusMenu: some View {
         Menu {
-            ForEach(Annotation.Status.selectableCases, id: \.self) { status in
-                Button {
-                    Task { await documentManager.updateStatus(of: annotation, to: status) }
-                } label: {
-                    if annotation.status == status {
-                        Label(status.displayName, systemImage: "checkmark")
-                    } else {
-                        Text(status.displayName)
-                    }
-                }
-            }
+            statusActions
         } label: {
             if documentManager.updatingAnnotationIDs.contains(annotation.id) {
                 ProgressView().controlSize(.small)
@@ -199,8 +228,57 @@ private struct AnnotationListItem: View {
         .menuStyle(.borderlessButton)
         .tint(annotation.status.tint)
         .fixedSize()
-        .disabled(documentManager.updatingAnnotationIDs.contains(annotation.id))
+        .disabled(statusUpdateIsInProgress)
         .help("Status: \(annotation.status.displayName)")
+    }
+
+    @ViewBuilder
+    private var statusActions: some View {
+        ForEach(Annotation.Status.selectableCases, id: \.self) { status in
+            Button {
+                setStatus(status)
+            } label: {
+                if statusTargets.allSatisfy({ $0.status == status }) {
+                    Label(status.displayName, systemImage: "checkmark")
+                } else {
+                    Text(status.displayName)
+                }
+            }
+        }
+    }
+
+    private var statusTargets: [Annotation] {
+        guard documentManager.selectedAnnotationIDs.contains(annotation.id) else {
+            return [annotation]
+        }
+        return documentManager.annotations.filter {
+            documentManager.selectedAnnotationIDs.contains($0.id)
+        }
+    }
+
+    private var contextTargets: [Annotation] { statusTargets }
+
+    private var commentText: String? {
+        annotation.contents?.trimmedNilIfEmpty
+    }
+
+    private var statusUpdateIsInProgress: Bool {
+        statusTargets.contains { documentManager.updatingAnnotationIDs.contains($0.id) }
+    }
+
+    private var deleteIsInProgress: Bool {
+        documentManager.isSavingAnnotation || contextTargets.allSatisfy { $0.sourceID == nil }
+    }
+
+    private func copyComment() {
+        guard let commentText else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(commentText, forType: .string)
+    }
+
+    private func setStatus(_ status: Annotation.Status) {
+        let targets = statusTargets
+        Task { await documentManager.updateStatus(of: targets, to: status) }
     }
 }
 
