@@ -1,9 +1,20 @@
-<?xml version="1.0" encoding="utf-8"?>
-<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
-  <channel>
-    <title>AnnotView Updates</title>
-    <link>https://github.com/nrzkug/AnnotView/releases</link>
-    <description>Signed release feed for AnnotView.</description>
-    <language>en</language>
-  </channel>
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
+    <channel>
+        <title>AnnotView Updates</title>
+        <link>https://github.com/nrzkug/AnnotView/releases</link>
+        <description>Signed release feed for AnnotView.</description>
+        <language>en</language>
+        <item>
+            <title>0.2.0</title>
+            <pubDate>Thu, 03 Sep 2026 15:16:57 +0800</pubDate>
+            <link>https://github.com/nrzkug/AnnotView</link>
+            <sparkle:fullReleaseNotesLink>https://github.com/nrzkug/AnnotView/releases/tag/v0.2.0</sparkle:fullReleaseNotesLink>
+            <sparkle:version>3</sparkle:version>
+            <sparkle:shortVersionString>0.2.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <enclosure url="https://github.com/nrzkug/AnnotView/releases/download/v0.2.0/AnnotView-v0.2.0-macos-arm64.zip" length="1735891" type="application/octet-stream" sparkle:edSignature="4xAwTJzWkZm94KFT3RWAsMdTFmeAE40I6ZtPn0BkJaedETtosLeUpbEnYvBPlTSpsbCxyNkxhWi8tGuDe85zDw=="/>
+        </item>
+    </channel>
 </rss>
