@@ -84,6 +84,20 @@ struct MuPDFTool: Sendable {
             )
     }
 
+    static var diagnosticAvailability: String {
+        guard let executable = try? findExecutable() else { return "Not found" }
+        if executable.path == ProcessInfo.processInfo.environment["MUTOOL_PATH"] {
+            return "Available (MUTOOL_PATH)"
+        }
+        if executable == Bundle.main.url(forAuxiliaryExecutable: "mutool") {
+            return "Available (app bundle)"
+        }
+        if ["/opt/homebrew/bin/mutool", "/usr/local/bin/mutool"].contains(executable.path) {
+            return "Available (Homebrew location)"
+        }
+        return "Available (PATH)"
+    }
+
     private static func findExecutable() throws -> URL {
         let fileManager = FileManager.default
         var candidates = [ProcessInfo.processInfo.environment["MUTOOL_PATH"]].compactMap { $0 }

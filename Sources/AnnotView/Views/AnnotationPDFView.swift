@@ -4,7 +4,10 @@ import PDFKit
 /// PDFKit draws only page content; this subclass paints engine-neutral annotations on top.
 final class AnnotationPDFView: PDFView, @preconcurrency PDFPageOverlayViewProvider {
     var annotationTool: AnnotationTool = .selection {
-        didSet { window?.invalidateCursorRects(for: self) }
+        didSet {
+            guard oldValue != annotationTool else { return }
+            window?.invalidateCursorRects(for: self)
+        }
     }
     var onCreateMarkupRequest: (@MainActor (Annotation.Kind, PDFMarkupSelection) -> Void)?
     var onCreateNoteRequest: (@MainActor (PDFPagePoint) -> Void)?
@@ -111,7 +114,7 @@ final class AnnotationPDFView: PDFView, @preconcurrency PDFPageOverlayViewProvid
         if let mouseTrackingArea { removeTrackingArea(mouseTrackingArea) }
         let trackingArea = NSTrackingArea(
             rect: bounds,
-            options: [.mouseMoved, .mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
+            options: [.mouseMoved, .mouseEnteredAndExited, .cursorUpdate, .activeInKeyWindow, .inVisibleRect],
             owner: self
         )
         addTrackingArea(trackingArea)
@@ -125,8 +128,9 @@ final class AnnotationPDFView: PDFView, @preconcurrency PDFPageOverlayViewProvid
         }
     }
 
-    override func mouseMoved(with event: NSEvent) {
+    override func cursorUpdate(with event: NSEvent) {
         let viewPoint = convert(event.locationInWindow, from: nil)
+        guard visibleRect.contains(viewPoint) else { return }
         let target = annotationTarget(at: viewPoint)
         if target != nil {
             NSCursor.pointingHand.set()
@@ -139,6 +143,12 @@ final class AnnotationPDFView: PDFView, @preconcurrency PDFPageOverlayViewProvid
         } else {
             NSCursor.arrow.set()
         }
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        let viewPoint = convert(event.locationInWindow, from: nil)
+        guard visibleRect.contains(viewPoint) else { return }
+        let target = annotationTarget(at: viewPoint)
         interactionController.updateHover(
             annotation: target?.annotation,
             page: target?.page,
@@ -152,7 +162,8 @@ final class AnnotationPDFView: PDFView, @preconcurrency PDFPageOverlayViewProvid
 
     override func mouseExited(with event: NSEvent) {
         interactionController.clearHover()
-        NSCursor.arrow.set()
+        // The destination view owns the cursor now. Setting an arrow here can
+        // overwrite the split divider's resize cursor after AppKit sets it.
     }
 
     override func mouseDown(with event: NSEvent) {

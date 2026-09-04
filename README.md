@@ -43,11 +43,24 @@ Choose **AnnotView → Check for Updates…** to check the signed release feed a
 install a newer version. AnnotView also checks automatically; downloaded
 updates always require confirmation before installation.
 
+Update checks are enabled only inside an `.app` bundle with a valid HTTPS
+`SUFeedURL`. The menu item is disabled during development runs and whenever
+Sparkle cannot start a new check.
+
 For a release, ZIP the staged app and regenerate `appcast.xml` with Sparkle's
 `generate_appcast` tool. The tool adds Sparkle's EdDSA signature for the update
 archive; this is separate from the app bundle's current ad-hoc code signature.
 Commit the regenerated feed to the default branch before publishing the
 release; it is served from GitHub over HTTPS.
+
+## Menus and diagnostics
+
+- **File → Open Recent** reopens a recent PDF; **Clear Menu** clears the list.
+- **Control-Command-S** shows or hides Pages.
+- **Option-Command-I** shows or hides Annotations.
+- **Help → Copy Debug Info** copies app/macOS versions, architecture, appearance,
+  updater status, MuPDF availability/source, and document processing counts and
+  states. It excludes document names, paths, comment text, and raw error messages.
 
 ## Run and build
 

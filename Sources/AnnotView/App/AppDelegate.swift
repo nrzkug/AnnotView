@@ -1,5 +1,4 @@
 import AppKit
-import Sparkle
 import SwiftUI
 
 @main
@@ -14,64 +13,14 @@ struct AnnotViewApp: App {
         .defaultSize(width: 1_200, height: 760)
         .windowToolbarStyle(.unified)
         .commands {
-            CommandGroup(replacing: .newItem) {
-                Button("Open PDF…") {
-                    model.openDocument()
-                }
-                .keyboardShortcut("o", modifiers: .command)
-            }
-
+            ReaderCommands(
+                documentManager: model.documentManager,
+                chromeState: model.chromeState,
+                searchController: model.documentManager.searchController,
+                updater: model.updater,
+                appearanceSettings: model.appearanceSettings
+            )
             AnnotationUndoCommands(documentManager: model.documentManager)
-
-            CommandGroup(after: .toolbar) {
-                Divider()
-                Button("Show or Hide Pages") {
-                    model.chromeState.thumbnailSidebarIsPresented.toggle()
-                }
-                Button("Show or Hide Annotations") {
-                    model.chromeState.inspectorIsPresented.toggle()
-                }
-            }
-
-            CommandGroup(after: .appInfo) {
-                Button("Check for Updates…") {
-                    model.checkForUpdates()
-                }
-            }
-
-            CommandMenu("Navigate") {
-                Button("Find…") {
-                    model.chromeState.searchIsPresented = true
-                }
-                .keyboardShortcut("f", modifiers: .command)
-
-                Button("Find Next") {
-                    model.documentManager.selectNextSearchResult()
-                }
-                .keyboardShortcut("g", modifiers: .command)
-
-                Button("Find Previous") {
-                    model.documentManager.selectPreviousSearchResult()
-                }
-                .keyboardShortcut("g", modifiers: [.command, .shift])
-
-                Divider()
-
-                Button("Zoom In") {
-                    model.documentManager.requestZoom(.inwards)
-                }
-                .keyboardShortcut("+", modifiers: .command)
-
-                Button("Zoom Out") {
-                    model.documentManager.requestZoom(.outwards)
-                }
-                .keyboardShortcut("-", modifiers: .command)
-
-                Button("Actual Size") {
-                    model.documentManager.requestZoom(.actualSize)
-                }
-                .keyboardShortcut("0", modifiers: .command)
-            }
         }
 
         Settings {
@@ -154,11 +103,7 @@ final class AnnotViewApplicationModel {
     let documentManager = PDFDocumentManager()
     let chromeState = ReaderChromeState()
     let appearanceSettings = AppearanceSettings()
-    private let updaterController = SPUStandardUpdaterController(
-        startingUpdater: false,
-        updaterDelegate: nil,
-        userDriverDelegate: nil
-    )
+    let updater = AppUpdater()
 
     private var initialDocumentFlowStarted = false
     private var receivedExternalDocument = false
@@ -166,18 +111,6 @@ final class AnnotViewApplicationModel {
     private weak var readerWindow: NSWindow?
 
     private init() {}
-
-    func openDocument() {
-        Task { await documentManager.presentOpenPanel() }
-    }
-
-    func checkForUpdates() {
-        updaterController.checkForUpdates(nil)
-    }
-
-    func startUpdater() {
-        updaterController.startUpdater()
-    }
 
     func hideReaderWindowForInitialOpen() {
         captureReaderWindow()
@@ -260,7 +193,7 @@ final class AnnotViewAppDelegate: NSObject, NSApplicationDelegate {
         model.hideReaderWindowForInitialOpen()
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
-        model.startUpdater()
+        model.updater.start()
         Task { @MainActor in
             defer {
                 ProcessInfo.processInfo.enableAutomaticTermination(automaticTerminationReason)

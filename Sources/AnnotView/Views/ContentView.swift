@@ -42,6 +42,9 @@ struct ContentView: View {
         } detail: {
             reader
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .overlay(alignment: .top) {
+                    Divider().allowsHitTesting(false)
+                }
         }
         .navigationSplitViewStyle(.balanced)
         .navigationTitle(documentManager.documentURL?.lastPathComponent ?? "AnnotView")
@@ -58,6 +61,9 @@ struct ContentView: View {
         }
         .inspector(isPresented: $chromeState.inspectorIsPresented) {
             AnnotationSidebar(statusFilter: $annotationStatusFilter)
+                .overlay(alignment: .top) {
+                    Divider().allowsHitTesting(false)
+                }
                 .inspectorColumnWidth(
                     min: ColumnWidth.detailMin,
                     ideal: ColumnWidth.detailIdeal,
