@@ -4,6 +4,7 @@ import SwiftUI
 struct AnnotationSidebar: View {
     @EnvironmentObject private var documentManager: PDFDocumentManager
     @Binding var statusFilter: Annotation.Status?
+    @FocusState private var annotationListIsFocused: Bool
 
     var body: some View {
         Group {
@@ -36,15 +37,20 @@ struct AnnotationSidebar: View {
                             ForEach(pageGroups) { pageGroup in
                                 Section("Page \(pageGroup.pageIndex + 1)") {
                                     ForEach(pageGroup.threads) { thread in
-                                        AnnotationListItem(annotation: thread.root)
+                                        AnnotationListItem(annotation: thread.root) {
+                                            annotationListIsFocused = true
+                                        }
 
                                         ForEach(thread.replies) { reply in
-                                            AnnotationListItem(annotation: reply, isReply: true)
+                                            AnnotationListItem(annotation: reply, isReply: true) {
+                                                annotationListIsFocused = true
+                                            }
                                         }
                                     }
                                 }
                             }
                         }
+                        .focused($annotationListIsFocused)
                     }
                 }
             }
@@ -59,7 +65,10 @@ struct AnnotationSidebar: View {
     private var annotationSelectionBinding: Binding<Set<UUID>> {
         Binding(
             get: { documentManager.selectedAnnotationIDs.intersection(visibleAnnotationIDs) },
-            set: documentManager.selectAnnotations
+            set: { ids in
+                annotationListIsFocused = true
+                documentManager.selectAnnotations(ids)
+            }
         )
     }
 
@@ -72,11 +81,6 @@ struct AnnotationSidebar: View {
 
     private var statusFilterControls: some View {
         HStack(spacing: 10) {
-            Text("Annotations")
-                .fontWeight(.semibold)
-
-            Spacer(minLength: 8)
-
             Picker("Status", selection: $statusFilter) {
                 Text("All").tag(nil as Annotation.Status?)
                 ForEach(Annotation.Status.selectableCases, id: \.self) { status in
@@ -85,6 +89,8 @@ struct AnnotationSidebar: View {
             }
             .pickerStyle(.menu)
             .fixedSize()
+
+            Spacer(minLength: 8)
 
             Text("\(filteredAnnotationCount) / \(totalAnnotationCount)")
                 .monospacedDigit()
@@ -138,6 +144,7 @@ private struct AnnotationListItem: View {
     @EnvironmentObject private var documentManager: PDFDocumentManager
     let annotation: Annotation
     var isReply = false
+    let onFocusList: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
@@ -155,7 +162,6 @@ private struct AnnotationListItem: View {
             if let contents = annotation.contents?.trimmedNilIfEmpty {
                 Text(contents)
                     .lineLimit(3)
-                    .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
             Text(metadataLine)
@@ -201,6 +207,7 @@ private struct AnnotationListItem: View {
         // already-selected row.  Treat that click as an explicit navigation so
         // a dismissed preview is restored and the PDF returns to the comment.
         .onTapGesture {
+            onFocusList()
             if documentManager.selectedAnnotationIDs.contains(annotation.id) {
                 documentManager.goTo(annotation: annotation, preservingMultipleSelection: true)
             }
