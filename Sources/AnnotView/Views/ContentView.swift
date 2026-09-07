@@ -20,6 +20,7 @@ struct ContentView: View {
         static let sidebarMin: CGFloat = 220
         static let sidebarIdeal: CGFloat = 260
         static let sidebarMax: CGFloat = 360
+        static let mainMin: CGFloat = 420
         static let detailMin: CGFloat = 300
         static let detailIdeal: CGFloat = 360
         static let detailMax: CGFloat = 720
@@ -40,11 +41,7 @@ struct ContentView: View {
         NavigationSplitView(columnVisibility: sidebarVisibility) {
             sidebar
         } detail: {
-            reader
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .overlay(alignment: .top) {
-                    Divider().allowsHitTesting(false)
-                }
+            workspace
         }
         .navigationSplitViewStyle(.balanced)
         .navigationTitle(documentManager.documentURL?.lastPathComponent ?? "AnnotView")
@@ -58,17 +55,6 @@ struct ContentView: View {
             if !isPresented {
                 searchController.query = ""
             }
-        }
-        .inspector(isPresented: $chromeState.inspectorIsPresented) {
-            AnnotationSidebar(statusFilter: $annotationStatusFilter)
-                .overlay(alignment: .top) {
-                    Divider().allowsHitTesting(false)
-                }
-                .inspectorColumnWidth(
-                    min: ColumnWidth.detailMin,
-                    ideal: ColumnWidth.detailIdeal,
-                    max: ColumnWidth.detailMax
-                )
         }
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
@@ -106,6 +92,24 @@ struct ContentView: View {
             Button("OK", role: .cancel) {}
         } message: {
             Text(documentManager.errorMessage ?? "Unknown error")
+        }
+    }
+
+    private var workspace: some View {
+        ReaderContentSplitView(
+            isDetailVisible: $chromeState.inspectorIsPresented,
+            mainMinimumWidth: ColumnWidth.mainMin,
+            detailMinimumWidth: ColumnWidth.detailMin,
+            detailIdealWidth: ColumnWidth.detailIdeal,
+            detailMaximumWidth: ColumnWidth.detailMax
+        ) {
+            reader.frame(maxWidth: .infinity, maxHeight: .infinity)
+        } detail: {
+            AnnotationSidebar(statusFilter: $annotationStatusFilter)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .overlay(alignment: .top) {
+            Divider().allowsHitTesting(false)
         }
     }
 
