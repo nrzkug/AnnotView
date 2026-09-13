@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 @MainActor
 final class ReaderChromeState: ObservableObject {
@@ -120,11 +121,13 @@ struct ContentView: View {
                 .pickerStyle(.tabs)
                 .labelStyle(.iconOnly)
                 .fixedSize()
+                .disabled(documentManager.document == nil)
         } else {
             annotationToolPicker
                 .pickerStyle(.segmented)
                 .labelStyle(.iconOnly)
                 .fixedSize()
+                .disabled(documentManager.document == nil)
         }
     }
 
@@ -256,8 +259,8 @@ struct ContentView: View {
             Divider()
         }
     }
-
 }
+
 
 private extension AnnotationTool {
     var label: String {

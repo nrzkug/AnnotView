@@ -5,16 +5,34 @@ import PDFKit
 struct PDFKitDocumentBuilder: PDFDocumentBuilding {
     func build(from data: Data) -> LoadedPDFDocument? {
         guard let document = PDFDocument(data: data) else { return nil }
-
-        // PDFKit renders page content only. All annotations are drawn by the overlay.
-        for pageIndex in 0..<document.pageCount {
-            document.page(at: pageIndex)?.displaysAnnotations = false
-        }
-
+        Self.prepareDocument(document)
         return LoadedPDFDocument(
             document: document,
             outlineItems: Self.makeOutlineItems(document: document)
         )
+    }
+
+    func build(from url: URL) -> LoadedPDFDocument? {
+        guard let document = PDFDocument(url: url) else { return nil }
+        Self.prepareDocument(document)
+        return LoadedPDFDocument(
+            document: document,
+            outlineItems: Self.makeOutlineItems(document: document)
+        )
+    }
+
+    private static func prepareDocument(_ document: PDFDocument) {
+        // PDFKit renders page content only. Annotations are drawn by AnnotView's custom overlay.
+        // Strip non-link annotations in memory so PDFKit will not render them natively,
+        // while preserving native Link annotations for document navigation.
+        for pageIndex in 0..<document.pageCount {
+            guard let page = document.page(at: pageIndex) else { continue }
+            let nonLinks = page.annotations.filter { $0.type != "Link" }
+            for annotation in nonLinks {
+                page.removeAnnotation(annotation)
+            }
+            page.displaysAnnotations = false
+        }
     }
 
     private static func makeOutlineItems(document: PDFDocument) -> [DocumentOutlineItem] {

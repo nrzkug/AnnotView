@@ -1,0 +1,23 @@
+{
+  "skill_name": "annota-gakuyu-macos",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "请从 AnnotView 和 Gakuyu 提取一个可复用的 SwiftPM macOS App 骨架：包含 @main、单窗口、Settings、菜单命令、外观偏好和 AppDelegate 激活逻辑，但不要带任何 PDF、论文或 Agent 功能。",
+      "expected_output": "A domain-neutral macOS app shell with scenes, settings, menu commands, appearance persistence, and activation behavior, clearly separated from product features.",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "请把 AnnotView 和 Gakuyu 的打包经验整理成一个通用 macOS App 打包脚本设计：从 SwiftPM release binary 组装 .app，复制 Info.plist、图标、资源 bundle，签名并支持只 stage 不安装。",
+      "expected_output": "A feature-neutral staging/signing workflow with explicit bundle paths, resource verification, and separate stage/install behavior.",
+      "files": []
+    },
+    {
+      "id": 3,
+      "prompt": "一个 SwiftPM macOS App 在 swift run 下没有 Dock 图标，窗口也不自动前置；请基于 AnnotView/Gakuyu 的通用代码模式给出修复，并补充验证方式。",
+      "expected_output": "A focused AppDelegate activation-policy fix, without pulling in product-specific reader/library/agent code, plus a runnable verification step.",
+      "files": []
+    }
+  ]
+}

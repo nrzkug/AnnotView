@@ -369,6 +369,118 @@ struct PDFDocumentManagerTests {
         #expect(preview.size.width > 0)
         #expect(preview.size.height > 0)
     }
+
+    @Test @MainActor
+    func builderStripsNonLinkAnnotationsAndPreservesLinks() throws {
+        let temporaryDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("AnnotViewBuilderTest-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: temporaryDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+
+        let documentURL = temporaryDirectory.appendingPathComponent("test.pdf")
+        let image = NSImage(size: NSSize(width: 200, height: 200))
+        image.lockFocus()
+        NSColor.white.setFill()
+        NSRect(origin: .zero, size: image.size).fill()
+        image.unlockFocus()
+        let page = try #require(PDFPage(image: image))
+
+        let highlight = PDFAnnotation(
+            bounds: CGRect(x: 10, y: 10, width: 50, height: 20),
+            forType: .highlight,
+            withProperties: nil
+        )
+        let link = PDFAnnotation(
+            bounds: CGRect(x: 10, y: 50, width: 50, height: 20),
+            forType: .link,
+            withProperties: nil
+        )
+        page.addAnnotation(highlight)
+        page.addAnnotation(link)
+
+        let document = PDFDocument()
+        document.insert(page, at: 0)
+        #expect(document.write(to: documentURL))
+
+        let builder = PDFKitDocumentBuilder()
+        let loaded = try #require(builder.build(from: documentURL))
+        let loadedPage = try #require(loaded.document.page(at: 0))
+
+        #expect(loadedPage.displaysAnnotations == false)
+        #expect(loadedPage.annotations.count == 1)
+        #expect(loadedPage.annotations[0].type == "Link")
+    }
+
+    @Test @MainActor
+    func asyncThumbnailRendersAndCachesSmoothly() async throws {
+        let image = NSImage(size: NSSize(width: 200, height: 200))
+        image.lockFocus()
+        NSColor.white.setFill()
+        NSRect(origin: .zero, size: image.size).fill()
+        image.unlockFocus()
+        let page = try #require(PDFPage(image: image))
+        let document = PDFDocument()
+        document.insert(page, at: 0)
+
+        let data = try #require(document.dataRepresentation())
+        let manager = PDFDocumentManager()
+
+        let tempURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("thumb-\(UUID().uuidString).pdf")
+        try data.write(to: tempURL)
+        defer { try? FileManager.default.removeItem(at: tempURL) }
+
+        await manager.open(url: tempURL)
+        #expect(manager.document != nil)
+
+        #expect(manager.cachedThumbnail(for: 0, scale: 0.5) == nil)
+        let thumbnail = await manager.renderPageAsync(pageIndex: 0, scale: 0.5)
+        #expect(thumbnail != nil)
+        #expect(manager.cachedThumbnail(for: 0, scale: 0.5) != nil)
+    }
+
+    @Test @MainActor
+    func asyncThumbnailCompositesAnnotations() async throws {
+        let image = NSImage(size: NSSize(width: 200, height: 200))
+        image.lockFocus()
+        NSColor.white.setFill()
+        NSRect(origin: .zero, size: image.size).fill()
+        image.unlockFocus()
+        let page = try #require(PDFPage(image: image))
+        let document = PDFDocument()
+        document.insert(page, at: 0)
+
+        let data = try #require(document.dataRepresentation())
+        let note = Annotation(
+            sourceID: "note-1",
+            kind: .note,
+            pageIndex: 0,
+            bounds: CGRect(x: 50, y: 50, width: 20, height: 20),
+            color: .init(red: 1, green: 0, blue: 0, alpha: 1)
+        )
+        let manager = PDFDocumentManager(
+            annotationParser: FixedAnnotationParser(annotations: [note]),
+            documentBuilder: PDFKitDocumentBuilder()
+        )
+
+        let tempURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("thumb-annot-\(UUID().uuidString).pdf")
+        try data.write(to: tempURL)
+        defer { try? FileManager.default.removeItem(at: tempURL) }
+
+        await manager.open(url: tempURL)
+        #expect(manager.annotations.count == 1)
+
+        let initialRevision = manager.thumbnailRevision
+        let thumb = await manager.renderPageAsync(pageIndex: 0, scale: 0.5)
+        #expect(thumb != nil)
+        #expect(manager.cachedThumbnail(for: 0, scale: 0.5) != nil)
+
+        // Invalidation clears cache and bumps revision
+        manager.invalidateThumbnailCache()
+        #expect(manager.thumbnailRevision > initialRevision)
+        #expect(manager.cachedThumbnail(for: 0, scale: 0.5) == nil)
+    }
 }
 
 private struct FixedAnnotationParser: AnnotationParsing {

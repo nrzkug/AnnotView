@@ -73,6 +73,7 @@ final class PDFDocumentManager: ObservableObject {
     @Published private(set) var redoAnnotationTitle = "Redo"
     @Published var selectedPageIndex = 0
     @Published var errorMessage: String?
+    @Published private(set) var thumbnailRevision = 0
 
     let searchController: PDFSearchController
 
@@ -145,17 +146,28 @@ final class PDFDocumentManager: ObservableObject {
         let loadID = UUID()
         annotationLoadID = loadID
 
-        let displayData: Data
-        do {
-            displayData = try await displayDocumentPreparer.displayData(for: url)
-        } catch {
+        let loadedDocument: LoadedPDFDocument?
+        // Fast path: Build directly from URL with in-memory non-link annotation stripping.
+        // Bypasses subprocess invocation and disk re-compression, opening PDFs in milliseconds.
+        if displayDocumentPreparer is MuPDFDisplayDocumentPreparer,
+           let direct = documentBuilder.build(from: url) {
+            loadedDocument = direct
+        } else {
+            let displayData: Data
+            do {
+                displayData = try await displayDocumentPreparer.displayData(for: url)
+            } catch {
+                guard annotationLoadID == loadID else { return }
+                errorMessage = DocumentError.cannotPrepare(url, error.localizedDescription).localizedDescription
+                return
+            }
+
             guard annotationLoadID == loadID else { return }
-            errorMessage = DocumentError.cannotPrepare(url, error.localizedDescription).localizedDescription
-            return
+            loadedDocument = documentBuilder.build(from: displayData)
         }
 
         guard annotationLoadID == loadID else { return }
-        guard let loaded = documentBuilder.build(from: displayData) else {
+        guard let loaded = loadedDocument else {
             errorMessage = DocumentError.cannotOpen(url).localizedDescription
             return
         }
@@ -177,6 +189,31 @@ final class PDFDocumentManager: ObservableObject {
         await loadAnnotations(id: loadID, documentURL: url)
     }
 
+    func cachedThumbnail(for pageIndex: Int, scale: CGFloat) -> NSImage? {
+        let cacheKey = RenderedPageKey(pageIndex: pageIndex, scale: scale)
+        return renderedPageCache.object(forKey: cacheKey.value)
+    }
+
+    func renderPageAsync(pageIndex: Int, scale: CGFloat) async -> NSImage? {
+        let cacheKey = RenderedPageKey(pageIndex: pageIndex, scale: scale)
+        if let cached = renderedPageCache.object(forKey: cacheKey.value) { return cached }
+        guard let page = document?.page(at: pageIndex) else { return nil }
+
+        let pageBounds = page.bounds(for: .cropBox)
+        let size = CGSize(width: pageBounds.width * scale, height: pageBounds.height * scale)
+        guard size.width > 0, size.height > 0 else { return nil }
+
+        await Task.yield()
+
+        let baseImage = page.thumbnail(of: size, for: .cropBox)
+        let pageAnnotations = getAnnotations(pageIndex: pageIndex)
+        let image = pageAnnotations.isEmpty ? baseImage : compositeAnnotations(pageAnnotations, on: baseImage, page: page, scale: scale)
+
+        let estimatedCost = max(1, Int(image.size.width * image.size.height * 4))
+        renderedPageCache.setObject(image, forKey: cacheKey.value, cost: estimatedCost)
+        return image
+    }
+
     func renderPage(pageIndex: Int, scale: CGFloat) throws -> NSImage {
         let cacheKey = RenderedPageKey(pageIndex: pageIndex, scale: scale)
         if let cached = renderedPageCache.object(forKey: cacheKey.value) { return cached }
@@ -186,10 +223,48 @@ final class PDFDocumentManager: ObservableObject {
 
         let pageBounds = page.bounds(for: .cropBox)
         let size = CGSize(width: pageBounds.width * scale, height: pageBounds.height * scale)
-        let image = page.thumbnail(of: size, for: .cropBox)
-        let estimatedCost = max(1, Int(size.width * size.height * 4))
+        let baseImage = page.thumbnail(of: size, for: .cropBox)
+        let pageAnnotations = getAnnotations(pageIndex: pageIndex)
+        let image = pageAnnotations.isEmpty ? baseImage : compositeAnnotations(pageAnnotations, on: baseImage, page: page, scale: scale)
+
+        let estimatedCost = max(1, Int(image.size.width * image.size.height * 4))
         renderedPageCache.setObject(image, forKey: cacheKey.value, cost: estimatedCost)
         return image
+    }
+
+    private func compositeAnnotations(
+        _ pageAnnotations: [Annotation],
+        on baseImage: NSImage,
+        page: PDFPage,
+        scale: CGFloat
+    ) -> NSImage {
+        let size = baseImage.size
+        guard size.width > 0, size.height > 0 else { return baseImage }
+        let composited = NSImage(size: size)
+        composited.lockFocus()
+        baseImage.draw(in: CGRect(origin: .zero, size: size))
+        if let context = NSGraphicsContext.current?.cgContext {
+            context.saveGState()
+            let pageBounds = page.bounds(for: .cropBox)
+            let isRotated = page.rotation == 90 || page.rotation == 270
+            let boxWidth = isRotated ? pageBounds.height : pageBounds.width
+            let boxHeight = isRotated ? pageBounds.width : pageBounds.height
+            if boxWidth > 0, boxHeight > 0 {
+                let scaleX = size.width / boxWidth
+                let scaleY = size.height / boxHeight
+                context.scaleBy(x: scaleX, y: scaleY)
+                context.concatenate(page.transform(for: .cropBox))
+                AnnotationOverlayRenderer.draw(pageAnnotations, context: context)
+            }
+            context.restoreGState()
+        }
+        composited.unlockFocus()
+        return composited
+    }
+
+    func invalidateThumbnailCache() {
+        renderedPageCache.removeAllObjects()
+        thumbnailRevision += 1
     }
 
     func getAnnotations(pageIndex: Int) -> [Annotation] {
@@ -338,6 +413,7 @@ final class PDFDocumentManager: ObservableObject {
                     focusedAnnotation = annotations[index]
                 }
             }
+            invalidateThumbnailCache()
         } catch {
             errorMessage = candidates.count == 1
                 ? "Annotation status could not be updated: \(error.localizedDescription)"
@@ -708,6 +784,7 @@ final class PDFDocumentManager: ObservableObject {
         if let focusedSourceID {
             focusedAnnotation = replacements.first(where: { $0.sourceID == focusedSourceID })
         }
+        invalidateThumbnailCache()
     }
 
     private func clearAnnotationHistory() {

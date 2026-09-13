@@ -38,20 +38,7 @@ struct ThumbnailSidebar: View {
             if let document = documentManager.document, mode == .thumbnails {
                 List(selection: $documentManager.selectedPageIndex) {
                     ForEach(0..<document.pageCount, id: \.self) { pageIndex in
-                        VStack(spacing: 6) {
-                            if let image = try? documentManager.renderPage(pageIndex: pageIndex, scale: 0.5) {
-                                Image(nsImage: image)
-                                    .interpolation(.high)
-                                    .resizable()
-                                    .scaledToFit()
-                                    .shadow(radius: 1, y: 1)
-                            }
-                            Text("Page \(pageIndex + 1)")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                        .padding(.vertical, 6)
-                        .tag(pageIndex)
+                        PageThumbnailItem(pageIndex: pageIndex)
                     }
                 }
             } else if documentManager.document != nil, hasOutline {
@@ -71,9 +58,45 @@ struct ThumbnailSidebar: View {
             } else if documentManager.document != nil {
                 ContentUnavailableView("No Outline", systemImage: "list.bullet.indent")
             } else {
-                ContentUnavailableView("Pages", systemImage: "rectangle.stack")
+                ContentUnavailableView("No Document", systemImage: "doc", description: Text("Open a PDF to view pages or outline"))
             }
         }
         .listStyle(.sidebar)
+    }
+}
+
+private struct PageThumbnailItem: View {
+    let pageIndex: Int
+    @EnvironmentObject private var documentManager: PDFDocumentManager
+    @State private var thumbnail: NSImage?
+
+    var body: some View {
+        VStack(spacing: 6) {
+            Group {
+                if let image = thumbnail ?? documentManager.cachedThumbnail(for: pageIndex, scale: 0.5) {
+                    Image(nsImage: image)
+                        .interpolation(.high)
+                        .resizable()
+                        .scaledToFit()
+                        .shadow(radius: 1, y: 1)
+                } else {
+                    RoundedRectangle(cornerRadius: 3)
+                        .fill(Color(nsColor: .separatorColor).opacity(0.15))
+                        .aspectRatio(0.77, contentMode: .fit)
+                        .overlay {
+                            ProgressView()
+                                .controlSize(.mini)
+                        }
+                }
+            }
+            Text("Page \(pageIndex + 1)")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .padding(.vertical, 6)
+        .tag(pageIndex)
+        .task(id: "\(pageIndex)-\(documentManager.thumbnailRevision)") {
+            thumbnail = await documentManager.renderPageAsync(pageIndex: pageIndex, scale: 0.5)
+        }
     }
 }

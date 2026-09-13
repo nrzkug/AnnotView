@@ -112,9 +112,14 @@ final class AnnotViewApplicationModel {
 
     private init() {}
 
-    func hideReaderWindowForInitialOpen() {
+    func hideReaderWindow() {
         captureReaderWindow()
         readerWindow?.orderOut(nil)
+    }
+
+    func captureReaderWindow() {
+        guard readerWindow == nil else { return }
+        readerWindow = NSApp.windows.first { !($0 is NSPanel) }
     }
 
     func openFromSystem(_ url: URL) {
@@ -130,16 +135,14 @@ final class AnnotViewApplicationModel {
         guard !initialDocumentFlowStarted else { return }
         initialDocumentFlowStarted = true
 
-        hideReaderWindowForInitialOpen()
+        hideReaderWindow()
         if readerWindow == nil {
             await Task.yield()
-            hideReaderWindowForInitialOpen()
+            hideReaderWindow()
         }
 
-        // Launch Services can deliver an open-document event shortly after the
-        // app finishes launching. Keep the reader hidden while allowing that
-        // event to arrive before presenting a standalone open panel.
-        try? await Task.sleep(for: .milliseconds(250))
+        // Allow Launch Services a brief moment to deliver an open event if launched from a file
+        try? await Task.sleep(for: .milliseconds(50))
         if receivedExternalDocument {
             await externalOpenTask?.value
             showReaderWindowIfReady()
@@ -153,6 +156,7 @@ final class AnnotViewApplicationModel {
             return
         }
 
+        // Present only the PDF open panel while keeping reader window hidden
         await documentManager.presentOpenPanel()
         if receivedExternalDocument {
             await externalOpenTask?.value
@@ -167,12 +171,7 @@ final class AnnotViewApplicationModel {
         }
     }
 
-    private func captureReaderWindow() {
-        guard readerWindow == nil else { return }
-        readerWindow = NSApp.windows.first { !($0 is NSPanel) }
-    }
-
-    private func showReaderWindowIfReady() {
+    func showReaderWindowIfReady() {
         guard documentManager.document != nil || documentManager.errorMessage != nil else { return }
         captureReaderWindow()
         readerWindow?.makeKeyAndOrderFront(nil)
@@ -188,16 +187,11 @@ final class AnnotViewAppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let model = AnnotViewApplicationModel.shared
-        let automaticTerminationReason = "Opening the initial PDF document"
-        ProcessInfo.processInfo.disableAutomaticTermination(automaticTerminationReason)
-        model.hideReaderWindowForInitialOpen()
+        model.hideReaderWindow()
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
         model.updater.start()
         Task { @MainActor in
-            defer {
-                ProcessInfo.processInfo.enableAutomaticTermination(automaticTerminationReason)
-            }
             await model.runInitialDocumentFlow()
         }
     }
