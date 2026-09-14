@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SwiftUI
 
 @main
@@ -7,11 +8,10 @@ struct AnnotViewApp: App {
     private let model = AnnotViewApplicationModel.shared
 
     var body: some Scene {
-        Window("AnnotView", id: "reader") {
-            AnnotViewRootView(model: model)
+        Settings {
+            AppearanceSettingsView(settings: model.appearanceSettings)
+                .preferredColorScheme(model.appearanceSettings.appearance.colorScheme)
         }
-        .defaultSize(width: 1_200, height: 760)
-        .windowToolbarStyle(.unified)
         .commands {
             ReaderCommands(
                 documentManager: model.documentManager,
@@ -21,11 +21,6 @@ struct AnnotViewApp: App {
                 appearanceSettings: model.appearanceSettings
             )
             AnnotationUndoCommands(documentManager: model.documentManager)
-        }
-
-        Settings {
-            AppearanceSettingsView(settings: model.appearanceSettings)
-                .preferredColorScheme(model.appearanceSettings.appearance.colorScheme)
         }
     }
 }
@@ -93,11 +88,42 @@ private struct AnnotViewRootView: View {
             .environmentObject(model.chromeState)
             .environmentObject(model.documentManager.searchController)
             .preferredColorScheme(appearanceSettings.appearance.colorScheme)
+            .frame(minWidth: 720, minHeight: 480)
     }
 }
 
 @MainActor
-final class AnnotViewApplicationModel {
+final class ReaderWindowController: NSWindowController, NSWindowDelegate {
+    private var cancellables = Set<AnyCancellable>()
+
+    convenience init(model: AnnotViewApplicationModel) {
+        let rootView = AnnotViewRootView(model: model)
+        let hostingController = NSHostingController(rootView: rootView)
+        let window = NSWindow(contentViewController: hostingController)
+        window.title = "AnnotView"
+        window.setContentSize(NSSize(width: 1_200, height: 760))
+        window.minSize = NSSize(width: 720, height: 480)
+        window.styleMask = [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView]
+        window.toolbarStyle = .unified
+        window.tabbingMode = .disallowed
+        window.isReleasedWhenClosed = false
+        window.setFrameAutosaveName("AnnotViewReaderMainWindow")
+
+        self.init(window: window)
+        window.delegate = self
+
+        model.documentManager.$documentURL
+            .receive(on: RunLoop.main)
+            .sink { [weak window] url in
+                window?.title = url?.lastPathComponent ?? "AnnotView"
+                window?.representedURL = url
+            }
+            .store(in: &cancellables)
+    }
+}
+
+@MainActor
+final class AnnotViewApplicationModel: ObservableObject {
     static let shared = AnnotViewApplicationModel()
 
     let documentManager = PDFDocumentManager()
@@ -105,99 +131,96 @@ final class AnnotViewApplicationModel {
     let appearanceSettings = AppearanceSettings()
     let updater = AppUpdater()
 
-    private var initialDocumentFlowStarted = false
-    private var receivedExternalDocument = false
-    private var externalOpenTask: Task<Void, Never>?
-    private weak var readerWindow: NSWindow?
+    private(set) var windowController: ReaderWindowController?
+    private var cancellables = Set<AnyCancellable>()
 
-    private init() {}
-
-    func hideReaderWindow() {
-        captureReaderWindow()
-        readerWindow?.orderOut(nil)
+    private init() {
+        documentManager.$document
+            .combineLatest(documentManager.$errorMessage)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] document, errorMessage in
+                if document != nil || errorMessage != nil {
+                    self?.showReaderWindow()
+                }
+            }
+            .store(in: &cancellables)
     }
 
-    func captureReaderWindow() {
-        guard readerWindow == nil else { return }
-        readerWindow = NSApp.windows.first { !($0 is NSPanel) }
-    }
-
-    func openFromSystem(_ url: URL) {
-        receivedExternalDocument = true
+    func open(url: URL) async {
         documentManager.cancelOpenPanel()
-        externalOpenTask = Task {
-            await documentManager.open(url: url)
-            showReaderWindowIfReady()
-        }
+        await documentManager.open(url: url)
+        showReaderWindow()
     }
 
-    func runInitialDocumentFlow() async {
-        guard !initialDocumentFlowStarted else { return }
-        initialDocumentFlowStarted = true
-
-        hideReaderWindow()
-        if readerWindow == nil {
-            await Task.yield()
-            hideReaderWindow()
-        }
-
-        // Allow Launch Services a brief moment to deliver an open event if launched from a file
-        try? await Task.sleep(for: .milliseconds(50))
-        if receivedExternalDocument {
-            await externalOpenTask?.value
-            showReaderWindowIfReady()
-            return
-        }
-
-        await documentManager.openCommandLineDocumentIfPresent()
-        if documentManager.document != nil || receivedExternalDocument {
-            await externalOpenTask?.value
-            showReaderWindowIfReady()
-            return
-        }
-
-        // Present only the PDF open panel while keeping reader window hidden
+    func presentInitialOpenPanel() async {
         await documentManager.presentOpenPanel()
-        if receivedExternalDocument {
-            await externalOpenTask?.value
-            showReaderWindowIfReady()
-            return
-        }
-
-        if documentManager.document == nil, documentManager.errorMessage == nil {
-            NSApp.terminate(nil)
+        if documentManager.document == nil && documentManager.errorMessage == nil {
+            if windowController?.window?.isVisible != true {
+                NSApp.terminate(nil)
+            }
         } else {
-            showReaderWindowIfReady()
+            showReaderWindow()
         }
     }
 
-    func showReaderWindowIfReady() {
+    func showReaderWindow() {
         guard documentManager.document != nil || documentManager.errorMessage != nil else { return }
-        captureReaderWindow()
-        readerWindow?.makeKeyAndOrderFront(nil)
+        if windowController == nil {
+            windowController = ReaderWindowController(model: self)
+        }
+        windowController?.showWindow(nil)
+        windowController?.window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
 }
 
 final class AnnotViewAppDelegate: NSObject, NSApplicationDelegate {
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        let manager = AnnotViewApplicationModel.shared.documentManager
-        return manager.document != nil || manager.errorMessage != nil
-    }
+    private var openedInitialDocument = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let model = AnnotViewApplicationModel.shared
-        model.hideReaderWindow()
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
         model.updater.start()
-        Task { @MainActor in
-            await model.runInitialDocumentFlow()
+
+        if let path = CommandLine.arguments.dropFirst().first(where: {
+            !$0.hasPrefix("-") && $0.lowercased().hasSuffix(".pdf")
+        }) {
+            openedInitialDocument = true
+            Task { @MainActor in
+                await model.open(url: URL(fileURLWithPath: path))
+            }
         }
     }
 
     func application(_ application: NSApplication, open urls: [URL]) {
         guard let url = urls.last else { return }
-        AnnotViewApplicationModel.shared.openFromSystem(url)
+        openedInitialDocument = true
+        Task { @MainActor in
+            await AnnotViewApplicationModel.shared.open(url: url)
+        }
+    }
+
+    func applicationOpenUntitledFile(_ sender: NSApplication) -> Bool {
+        guard !openedInitialDocument else { return true }
+        Task { @MainActor in
+            await AnnotViewApplicationModel.shared.presentInitialOpenPanel()
+        }
+        return true
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if !flag {
+            Task { @MainActor in
+                await AnnotViewApplicationModel.shared.presentInitialOpenPanel()
+            }
+            return false
+        }
+        return true
+    }
+
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        let manager = AnnotViewApplicationModel.shared.documentManager
+        return manager.document != nil || manager.errorMessage != nil
     }
 }
