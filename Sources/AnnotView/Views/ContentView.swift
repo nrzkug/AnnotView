@@ -81,7 +81,6 @@ struct ContentView: View {
                 .help("Show or hide annotations inspector")
             }
         }
-        .toolbarRole(.editor)
         .frame(minWidth: 1_000, minHeight: 620)
         .alert(
             "AnnotView",
