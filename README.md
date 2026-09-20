@@ -23,15 +23,6 @@ Built with SwiftUI, AppKit, and PDFKit, AnnotView focuses on reading papers and 
 ## Requirements
 
 - macOS 26 or later
-- MuPDF `mutool`
-
-Install MuPDF with Homebrew:
-
-```sh
-brew install mupdf
-```
-
-AnnotView looks for `mutool` in `MUTOOL_PATH`, the app bundle, common Homebrew locations, and `PATH`.
 
 ## Install a release
 
@@ -63,6 +54,8 @@ release; it is served from GitHub over HTTPS.
   states. It excludes document names, paths, comment text, and raw error messages.
 
 ## Run and build
+
+Building from source requires `brew install mupdf`.
 
 Run from source:
 
