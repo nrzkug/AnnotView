@@ -92,53 +92,6 @@ private struct AnnotViewRootView: View {
     }
 }
 
-private struct SidebarToggleButton: View {
-    @ObservedObject var chromeState: ReaderChromeState
-    @State private var isHovered = false
-
-    var body: some View {
-        Button {
-            chromeState.thumbnailSidebarIsPresented.toggle()
-        } label: {
-            Image(systemName: "sidebar.left")
-                .font(.system(size: 13, weight: .regular))
-                .foregroundColor(.primary.opacity(0.8))
-                .frame(width: 28, height: 28)
-                .background(
-                    Circle()
-                        .fill(.ultraThinMaterial)
-                        .overlay(
-                            Circle()
-                                .fill(isHovered ? Color.primary.opacity(0.06) : Color.clear)
-                        )
-                        .overlay(
-                            Circle()
-                                .strokeBorder(Color.primary.opacity(0.12), lineWidth: 0.5)
-                        )
-                        .shadow(color: Color.black.opacity(0.08), radius: 1, x: 0, y: 0.5)
-                )
-        }
-        .buttonStyle(.plain)
-        .onHover { isHovered = $0 }
-        .help(chromeState.thumbnailSidebarIsPresented ? "Hide sidebar" : "Show sidebar")
-    }
-}
-
-private final class SidebarTitlebarAccessoryController: NSTitlebarAccessoryViewController {
-    init(chromeState: ReaderChromeState) {
-        super.init(nibName: nil, bundle: nil)
-        self.layoutAttribute = .left
-        let buttonView = SidebarToggleButton(chromeState: chromeState)
-        let hostingView = NSHostingView(rootView: buttonView)
-        hostingView.frame = NSRect(x: 0, y: 0, width: 34, height: 28)
-        self.view = hostingView
-    }
-
-    required init?(coder: NSCoder) {
-        fatalError("init(coder:) has not been implemented")
-    }
-}
-
 @MainActor
 final class ReaderWindowController: NSWindowController, NSWindowDelegate {
     private var cancellables = Set<AnyCancellable>()
@@ -155,9 +108,6 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate {
         window.tabbingMode = .disallowed
         window.isReleasedWhenClosed = false
         window.setFrameAutosaveName("AnnotViewReaderMainWindow")
-
-        let accessory = SidebarTitlebarAccessoryController(chromeState: model.chromeState)
-        window.addTitlebarAccessoryViewController(accessory)
 
         self.init(window: window)
         window.delegate = self
@@ -239,6 +189,12 @@ final class AnnotViewAppDelegate: NSObject, NSApplicationDelegate {
             openedInitialDocument = true
             Task { @MainActor in
                 await model.open(url: URL(fileURLWithPath: path))
+            }
+        } else {
+            Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(100))
+                guard !self.openedInitialDocument else { return }
+                await model.presentInitialOpenPanel()
             }
         }
     }

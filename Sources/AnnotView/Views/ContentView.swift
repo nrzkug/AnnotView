@@ -142,6 +142,16 @@ struct ContentView: View {
 
     private var sidebar: some View {
         ThumbnailSidebar()
+            .toolbar {
+                ToolbarItem {
+                    Button {
+                        chromeState.thumbnailSidebarIsPresented.toggle()
+                    } label: {
+                        Label("Pages", systemImage: "sidebar.left")
+                    }
+                    .help(chromeState.thumbnailSidebarIsPresented ? "Hide sidebar" : "Show sidebar")
+                }
+            }
             .navigationSplitViewColumnWidth(
                 min: ColumnWidth.sidebarMin,
                 ideal: ColumnWidth.sidebarIdeal,
