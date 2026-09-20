@@ -8,16 +8,11 @@ AnnotView is a lightweight native macOS PDF reader for reviewing Adobe Acrobat a
 
 I built AnnotView for my own workflow: my advisor reviews papers in Adobe Acrobat, while I only need a fast way to read the annotations and work through the comments. Acrobat feels too heavy for that, and Preview does not always render Acrobat text markup correctly. AnnotView is a small, focused reader—not a full PDF editor.
 
-Built with SwiftUI, AppKit, and PDFKit, AnnotView focuses on reading papers and processing review comments. It uses MuPDF to handle Acrobat annotations more reliably, including text markup positioned with `QuadPoints`.
-
 ## Features
 
 - Renders highlights, underlines, strikeouts, text notes, and Insert-Text carets.
-- Shows annotation authors, dates, comments, replies, and colors.
 - Creates and edits Acrobat-compatible highlights, underlines, strikethroughs, sticky notes, and insert-text markers.
 - Supports Acrobat review states: Accepted, Rejected, Cancelled, and Completed.
-- Supports Command/Shift multi-selection and batch review-state updates.
-- Provides comment copying, annotation navigation, and document search.
 - Ships an `annotool` CLI for reading and writing Acrobat annotations from a terminal or AI agent.
 
 ## Requirements
@@ -28,55 +23,11 @@ Built with SwiftUI, AppKit, and PDFKit, AnnotView focuses on reading papers and 
 
 Download the macOS ZIP from Releases, unzip it, and move `AnnotView.app` to Applications. The app is ad-hoc signed, so macOS may block its first launch. Control-click the app and choose **Open**, or allow it in **System Settings → Privacy & Security**.
 
-## Updates
-
-Choose **AnnotView → Check for Updates…** to check the signed release feed and
-install a newer version. AnnotView also checks automatically; downloaded
-updates always require confirmation before installation.
-
-Update checks are enabled only inside an `.app` bundle with a valid HTTPS
-`SUFeedURL`. The menu item is disabled during development runs and whenever
-Sparkle cannot start a new check.
-
-For a release, ZIP the staged app and regenerate `appcast.xml` with Sparkle's
-`generate_appcast` tool. The tool adds Sparkle's EdDSA signature for the update
-archive; this is separate from the app bundle's current ad-hoc code signature.
-Commit the regenerated feed to the default branch before publishing the
-release; it is served from GitHub over HTTPS.
-
-## Menus and diagnostics
-
-- **File → Open Recent** reopens a recent PDF; **Clear Menu** clears the list.
-- **Control-Command-S** shows or hides Pages.
-- **Option-Command-I** shows or hides Annotations.
-- **Help → Copy Debug Info** copies app/macOS versions, architecture, appearance,
-  updater status, MuPDF availability/source, and document processing counts and
-  states. It excludes document names, paths, comment text, and raw error messages.
-
 ## Run and build
 
 Building from source requires `brew install mupdf`.
 
-Run from source:
-
-```sh
-swift run AnnotView
-```
-
-Build, package, sign, and install a fresh copy of the app from one command:
-
-```sh
-./Scripts/package.sh          # build → stage in dist/ → install to /Applications → launch
-./Scripts/package.sh --stage  # build and stage only, no install
-```
-
-The script is the single packaging entry point. It assembles the `.app` from the
-release binary, `AppBundle/Info.plist` + icon, the SwiftPM resource bundle (which
-carries the MuPDF JS scripts from `Sources/AnnotView/Resources/MuPDF/`), and the
-`annotool` CLI, then ad-hoc signs and launches it. It fails loudly if the bundled
-JS ever drifts from the sources.
-
-For a plain executable build without packaging:
+Build from source:
 
 ```sh
 swift build -c release --product AnnotView
