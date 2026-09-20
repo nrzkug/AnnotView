@@ -27,13 +27,10 @@ struct ReaderCommands: Commands {
 
         CommandGroup(after: .toolbar) {
             Divider()
-            Button(chromeState.thumbnailSidebarIsPresented ? "Hide Pages" : "Show Pages") {
-                chromeState.thumbnailSidebarIsPresented.toggle()
-            }
-            .keyboardShortcut("s", modifiers: [.control, .command])
-
             Button(chromeState.inspectorIsPresented ? "Hide Annotations" : "Show Annotations") {
-                chromeState.inspectorIsPresented.toggle()
+                withAnimation {
+                    chromeState.inspectorIsPresented.toggle()
+                }
             }
             .keyboardShortcut("i", modifiers: [.option, .command])
         }

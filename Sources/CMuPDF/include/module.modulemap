@@ -1,0 +1,4 @@
+module CMuPDF [system] {
+    header "MuPDFBridge.h"
+    export *
+}

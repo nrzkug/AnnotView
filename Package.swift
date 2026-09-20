@@ -12,9 +12,22 @@ let package = Package(
         .package(url: "https://github.com/sparkle-project/Sparkle", from: "2.8.0")
     ],
     targets: [
+        .target(
+            name: "CMuPDF",
+            path: "Sources/CMuPDF",
+            publicHeadersPath: "include",
+            cSettings: [
+                .headerSearchPath("include"),
+                .unsafeFlags(["-I/opt/homebrew/include"])
+            ],
+            linkerSettings: [
+                .unsafeFlags(["-L/opt/homebrew/lib", "-lmupdf"])
+            ]
+        ),
         .executableTarget(
             name: "AnnotView",
             dependencies: [
+                "CMuPDF",
                 .product(name: "Sparkle", package: "Sparkle")
             ],
             path: "Sources/AnnotView",
@@ -30,6 +43,7 @@ let package = Package(
             name: "AnnotViewTests",
             dependencies: [
                 "AnnotView",
+                "CMuPDF",
                 .product(name: "Sparkle", package: "Sparkle")
             ],
             path: "Tests/AnnotViewTests",

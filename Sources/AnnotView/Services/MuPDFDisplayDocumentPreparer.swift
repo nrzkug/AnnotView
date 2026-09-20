@@ -1,3 +1,4 @@
+import CMuPDF
 import Foundation
 
 actor MuPDFDisplayDocumentPreparer: PDFDisplayDocumentPreparing {
@@ -21,41 +22,31 @@ actor MuPDFDisplayDocumentPreparer: PDFDisplayDocumentPreparing {
         }
     }
 
-    private let tool: MuPDFTool
-    private let scriptURL: URL?
-
-    init(executableURL: URL? = nil, scriptURL: URL? = nil) {
-        tool = MuPDFTool(executableURL: executableURL)
-        self.scriptURL = scriptURL
-    }
+    init(executableURL: URL? = nil, scriptURL: URL? = nil) {}
 
     func displayData(for documentURL: URL) async throws -> Data {
-        let script = try scriptURL ?? Self.findScript()
         let temporaryDirectory = FileManager.default.temporaryDirectory
             .appendingPathComponent("AnnotView-Display-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: temporaryDirectory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
 
         let outputURL = temporaryDirectory.appendingPathComponent("display.pdf")
-        do {
-            _ = try await tool.run(
-                script: script,
-                arguments: [documentURL.path, outputURL.path]
-            )
-        } catch MuPDFTool.ToolError.executableNotFound {
-            throw PreparationError.executableNotFound
-        } catch MuPDFTool.ToolError.processFailed(let status, let message) {
-            throw PreparationError.processFailed(status: status, message: message)
+        var outError: UnsafeMutablePointer<CChar>?
+        let success = documentURL.path.withCString { inPath in
+            outputURL.path.withCString { outPath in
+                mupdf_bridge_strip_annotations(inPath, outPath, &outError)
+            }
+        }
+        defer {
+            if let outError { mupdf_bridge_free(outError) }
+        }
+        guard success else {
+            let msg = outError.flatMap { String(cString: $0) } ?? "Unknown error"
+            throw PreparationError.processFailed(status: 1, message: msg)
         }
 
         let data = try Data(contentsOf: outputURL)
         guard !data.isEmpty else { throw PreparationError.emptyOutput }
         return data
-    }
-
-    private static func findScript() throws -> URL {
-        let url = MuPDFTool.bundledScript(named: "strip_annotations")
-        guard let url else { throw PreparationError.scriptNotFound }
-        return url
     }
 }

@@ -1,3 +1,4 @@
+import CMuPDF
 import CoreGraphics
 import Foundation
 
@@ -50,28 +51,23 @@ struct MuPDFAnnotationParser: AnnotationParsing {
         let state: String?
     }
 
-    private let tool: MuPDFTool
-    private let scriptURL: URL?
-
-    init(executableURL: URL? = nil, scriptURL: URL? = nil) {
-        tool = MuPDFTool(executableURL: executableURL)
-        self.scriptURL = scriptURL
-    }
+    init(executableURL: URL? = nil, scriptURL: URL? = nil) {}
 
     func annotations(in documentURL: URL) async throws -> [Annotation] {
-        let script = try scriptURL ?? Self.findScript()
-        let data: Data
-        do {
-            data = try await tool.run(
-                script: script,
-                arguments: [documentURL.path],
-                capturesOutput: true
-            )
-        } catch MuPDFTool.ToolError.executableNotFound {
-            throw ParserError.executableNotFound
-        } catch MuPDFTool.ToolError.processFailed(let status, let message) {
-            throw ParserError.processFailed(status: status, message: message)
+        var outJSON: UnsafeMutablePointer<CChar>?
+        var outError: UnsafeMutablePointer<CChar>?
+        let success = documentURL.path.withCString { cPath in
+            mupdf_bridge_parse_annotations(cPath, &outJSON, &outError)
         }
+        defer {
+            if let outJSON { mupdf_bridge_free(outJSON) }
+            if let outError { mupdf_bridge_free(outError) }
+        }
+        guard success, let outJSON else {
+            let msg = outError.flatMap { String(cString: $0) } ?? "Unknown error"
+            throw ParserError.processFailed(status: 1, message: msg)
+        }
+        let data = Data(bytes: outJSON, count: strlen(outJSON))
         return try Self.decode(data)
     }
 

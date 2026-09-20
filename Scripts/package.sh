@@ -59,9 +59,21 @@ if [[ -d "$BIN_DIR/Sparkle.framework" ]]; then
   cp -R "$BIN_DIR/Sparkle.framework" "$STAGING/Contents/Frameworks/Sparkle.framework"
 fi
 
+# Bundle embedded MuPDF dynamic library
+MUPDF_DYLIB="/opt/homebrew/opt/mupdf/lib/libmupdf.dylib"
+if [[ -f "$MUPDF_DYLIB" ]]; then
+  cp "$MUPDF_DYLIB" "$STAGING/Contents/Frameworks/libmupdf.dylib"
+  chmod +w "$STAGING/Contents/Frameworks/libmupdf.dylib"
+  install_name_tool -id @rpath/libmupdf.dylib "$STAGING/Contents/Frameworks/libmupdf.dylib"
+  install_name_tool -change "$MUPDF_DYLIB" @rpath/libmupdf.dylib "$STAGING/Contents/MacOS/$APP_NAME"
+fi
+
 echo "==> Signing (ad hoc)"
 if [[ -d "$STAGING/Contents/Frameworks/Sparkle.framework" ]]; then
   codesign --force --sign - --timestamp=none "$STAGING/Contents/Frameworks/Sparkle.framework"
+fi
+if [[ -f "$STAGING/Contents/Frameworks/libmupdf.dylib" ]]; then
+  codesign --force --sign - --timestamp=none "$STAGING/Contents/Frameworks/libmupdf.dylib"
 fi
 codesign --force --sign - --timestamp=none "$STAGING"
 
@@ -72,6 +84,7 @@ fi
 
 echo "==> Installing to $DEST"
 pkill -f "$APP_NAME.app" 2>/dev/null || true
+sleep 0.5
 rm -rf "$DEST"
 cp -R "$STAGING" "$DEST"
 codesign --force --sign - --timestamp=none "$DEST"

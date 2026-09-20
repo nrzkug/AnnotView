@@ -6,6 +6,17 @@
         <description>Signed release feed for AnnotView.</description>
         <language>en</language>
         <item>
+            <title>0.3.0</title>
+            <pubDate>Sun, 20 Sep 2026 19:19:47 +0800</pubDate>
+            <link>https://github.com/nrzkug/AnnotView</link>
+            <sparkle:fullReleaseNotesLink>https://github.com/nrzkug/AnnotView/releases/tag/v0.3.0</sparkle:fullReleaseNotesLink>
+            <sparkle:version>8</sparkle:version>
+            <sparkle:shortVersionString>0.3.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <enclosure url="https://github.com/nrzkug/AnnotView/releases/download/v0.3.0/AnnotView-v0.3.0-macos-arm64.zip" length="38187835" type="application/octet-stream" sparkle:edSignature="4qSmaEwLNdhSRFxB46X/2NgflTNaLKzcHtH0gBbKYYNPU85fPiZ+Ff/fxviTR+yQLalIEeR1ho5VoL4/cbqpAQ=="/>
+        </item>
+        <item>
             <title>0.2.4</title>
             <pubDate>Fri, 18 Sep 2026 20:32:44 +0800</pubDate>
             <link>https://github.com/nrzkug/AnnotView</link>
