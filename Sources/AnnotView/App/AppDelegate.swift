@@ -110,6 +110,7 @@ final class AnnotViewApplicationModel: ObservableObject {
 
 final class AnnotViewAppDelegate: NSObject, NSApplicationDelegate {
     private var documentController: PDFDocumentController?
+    private var openedInitialDocument = false
 
     func applicationWillFinishLaunching(_ notification: Notification) {
         documentController = PDFDocumentController()
@@ -123,25 +124,43 @@ final class AnnotViewAppDelegate: NSObject, NSApplicationDelegate {
         if let path = CommandLine.arguments.dropFirst().first(where: {
             !$0.hasPrefix("-") && $0.lowercased().hasSuffix(".pdf")
         }) {
+            openedInitialDocument = true
             let url = URL(fileURLWithPath: path)
             NSDocumentController.shared.openDocument(withContentsOf: url, display: true) { _, _, _ in }
+            return
+        }
+
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            if !self.openedInitialDocument && NSDocumentController.shared.documents.isEmpty {
+                NSDocumentController.shared.openDocument(nil)
+            }
         }
     }
 
     func application(_ sender: NSApplication, openFile filename: String) -> Bool {
+        openedInitialDocument = true
         let url = URL(fileURLWithPath: filename)
         NSDocumentController.shared.openDocument(withContentsOf: url, display: true) { _, _, _ in }
         return true
     }
 
     func application(_ application: NSApplication, open urls: [URL]) {
+        if !urls.isEmpty {
+            openedInitialDocument = true
+        }
         for url in urls {
             NSDocumentController.shared.openDocument(withContentsOf: url, display: true) { _, _, _ in }
         }
     }
 
     func applicationShouldOpenUntitledFile(_ sender: NSApplication) -> Bool {
-        false
+        let hasCommandLinePDF = CommandLine.arguments.dropFirst().contains(where: {
+            !$0.hasPrefix("-") && $0.lowercased().hasSuffix(".pdf")
+        })
+        if hasCommandLinePDF { return false }
+        if !NSDocumentController.shared.documents.isEmpty { return false }
+        return true
     }
 
     func applicationOpenUntitledFile(_ sender: NSApplication) -> Bool {
