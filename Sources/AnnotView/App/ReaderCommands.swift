@@ -62,6 +62,26 @@ struct ReaderCommands: Commands {
                 .disabled(documentManager.document == nil)
         }
 
+        CommandMenu("Annotate") {
+            Button("Highlight") {
+                NSApp.sendAction(#selector(AnnotationPDFView.highlightSelection(_:)), to: nil, from: nil)
+            }
+            .keyboardShortcut("h", modifiers: [.control, .command])
+            .disabled(documentManager.document == nil)
+
+            Button("Underline") {
+                NSApp.sendAction(#selector(AnnotationPDFView.underlineSelection(_:)), to: nil, from: nil)
+            }
+            .keyboardShortcut("u", modifiers: [.control, .command])
+            .disabled(documentManager.document == nil)
+
+            Button("Strikethrough") {
+                NSApp.sendAction(#selector(AnnotationPDFView.strikeoutSelection(_:)), to: nil, from: nil)
+            }
+            .keyboardShortcut("s", modifiers: [.control, .command])
+            .disabled(documentManager.document == nil)
+        }
+
         CommandGroup(after: .help) {
             Button("Copy Debug Info") {
                 AppDiagnostics.copy(

@@ -19,6 +19,10 @@ enum AnnotationTool: String, CaseIterable, Sendable {
     }
 }
 
+extension Notification.Name {
+    static let annotViewToolDidChange = Notification.Name("annotViewToolDidChange")
+}
+
 struct PDFMarkupQuad: Equatable, Sendable {
     /// Acrobat's QuadPoints order: top-left, top-right, bottom-left, bottom-right.
     let topLeft: CGPoint

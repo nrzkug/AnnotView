@@ -296,6 +296,182 @@ struct AnnotationCreationTests {
         document.insert(try #require(PDFPage(image: image)), at: 0)
         #expect(document.write(to: url))
     }
+
+    @Test @MainActor
+    func testAnnotateTableInUserPDF() async throws {
+        let pdfPath = "/Users/liguang/Downloads/基于生成式大模型的卷烟市场趋势洞察与决策项目的研究方向.pdf"
+        guard FileManager.default.fileExists(atPath: pdfPath) else { return }
+        
+        let tempURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("TableTest-\(UUID().uuidString).pdf")
+        try FileManager.default.copyItem(at: URL(fileURLWithPath: pdfPath), to: tempURL)
+        defer { try? FileManager.default.removeItem(at: tempURL) }
+        
+        let manager = PDFDocumentManager()
+        await manager.open(url: tempURL)
+        
+        guard let doc = manager.document, doc.page(at: 0) != nil else {
+            Issue.record("Failed to get page 0")
+            return
+        }
+        
+        // Find text inside table
+        let targetText = "市场洞察"
+        let matches = doc.findString(targetText, withOptions: [])
+        #expect(!matches.isEmpty)
+        guard let selection = matches.first else { return }
+        
+        // Build markup selection as AnnotationPDFView does
+        var quadsByPage: [Int: [PDFMarkupQuad]] = [:]
+        for line in selection.selectionsByLine() {
+            for page in line.pages {
+                let bounds = line.bounds(for: page)
+                guard bounds.width > 0.01, bounds.height > 0.01 else { continue }
+                let pageIndex = doc.index(for: page)
+                quadsByPage[pageIndex, default: []].append(
+                    PDFMarkupQuad(
+                        topLeft: CGPoint(x: bounds.minX, y: bounds.maxY),
+                        topRight: CGPoint(x: bounds.maxX, y: bounds.maxY),
+                        bottomLeft: CGPoint(x: bounds.minX, y: bounds.minY),
+                        bottomRight: CGPoint(x: bounds.maxX, y: bounds.minY)
+                    )
+                )
+            }
+        }
+        let pages = quadsByPage.keys.sorted().map {
+            PDFMarkupPageSelection(pageIndex: $0, quads: quadsByPage[$0] ?? [])
+        }
+        let markupSelection = PDFMarkupSelection(pages: pages, selectedText: selection.string ?? "")
+        
+        let annotation = await manager.createMarkup(kind: .highlight, selection: markupSelection)
+        let created = try #require(annotation)
+        #expect(created.kind == .highlight)
+        #expect(created.pageIndex == 0)
+        #expect(manager.annotations.contains { $0.id == created.id })
+    }
+
+    @Test @MainActor
+    func testAnnotationPDFViewInteraction() async throws {
+        let pdfPath = "/Users/liguang/Downloads/基于生成式大模型的卷烟市场趋势洞察与决策项目的研究方向.pdf"
+        guard FileManager.default.fileExists(atPath: pdfPath) else { return }
+        
+        let doc = try #require(PDFDocument(url: URL(fileURLWithPath: pdfPath)))
+        let view = AnnotationPDFView(frame: NSRect(x: 0, y: 0, width: 800, height: 1000))
+        view.document = doc
+        view.annotationTool = .highlight
+        
+        var receivedKind: Annotation.Kind?
+        var receivedSelection: PDFMarkupSelection?
+        view.onCreateMarkupRequest = { kind, sel in
+            receivedKind = kind
+            receivedSelection = sel
+        }
+        
+        // Find text in table
+        let matches = doc.findString("智能问答", withOptions: [])
+        let selection = try #require(matches.first)
+        view.setCurrentSelection(selection, animate: false)
+        
+        #expect(view.currentSelection != nil)
+        let markup = view.markupSelection()
+        #expect(markup != nil)
+        
+        let upEvent = try #require(
+            NSEvent.mouseEvent(
+                with: .leftMouseUp,
+                location: NSPoint(x: 100, y: 100),
+                modifierFlags: [],
+                timestamp: 0,
+                windowNumber: 0,
+                context: nil,
+                eventNumber: 1,
+                clickCount: 1,
+                pressure: 0
+            )
+        )
+        view.mouseUp(with: upEvent)
+        #expect(receivedKind == .highlight)
+        #expect(receivedSelection?.selectedText == "智能问答")
+        #expect(view.currentSelection == nil)
+    }
+
+    @Test @MainActor
+    func testSwitchToolToHighlightAnnotatesSelection() async throws {
+        let pdfPath = "/Users/liguang/Downloads/基于生成式大模型的卷烟市场趋势洞察与决策项目的研究方向.pdf"
+        guard FileManager.default.fileExists(atPath: pdfPath) else { return }
+        
+        let doc = try #require(PDFDocument(url: URL(fileURLWithPath: pdfPath)))
+        let view = AnnotationPDFView(frame: NSRect(x: 0, y: 0, width: 800, height: 1000))
+        view.document = doc
+        view.annotationTool = .selection
+        
+        var receivedKind: Annotation.Kind?
+        var receivedSelection: PDFMarkupSelection?
+        view.onCreateMarkupRequest = { kind, sel in
+            receivedKind = kind
+            receivedSelection = sel
+        }
+        
+        // Find text inside table
+        let matches = doc.findString("市场洞察", withOptions: [])
+        let selection = try #require(matches.first)
+        view.setCurrentSelection(selection, animate: false)
+        #expect(view.currentSelection != nil)
+        
+        // User switches tool to highlight (e.g. clicks highlight in toolbar)
+        view.annotationTool = .highlight
+        
+        #expect(receivedKind == .highlight)
+        #expect(receivedSelection?.selectedText.contains("市场洞察") == true)
+        #expect(view.currentSelection == nil)
+    }
+
+    @Test @MainActor
+    func testShortcutActionsAnnotateTableSelection() async throws {
+        let pdfPath = "/Users/liguang/Downloads/基于生成式大模型的卷烟市场趋势洞察与决策项目的研究方向.pdf"
+        guard FileManager.default.fileExists(atPath: pdfPath) else { return }
+        
+        let doc = try #require(PDFDocument(url: URL(fileURLWithPath: pdfPath)))
+        let view = AnnotationPDFView(frame: NSRect(x: 0, y: 0, width: 800, height: 1000))
+        view.document = doc
+        view.annotationTool = .selection
+        
+        var receivedKind: Annotation.Kind?
+        var receivedSelection: PDFMarkupSelection?
+        view.onCreateMarkupRequest = { kind, sel in
+            receivedKind = kind
+            receivedSelection = sel
+        }
+        
+        // 1. Highlight shortcut (Ctrl+Cmd+H) with text selected
+        let match1 = try #require(doc.findString("市场洞察", withOptions: []).first)
+        view.setCurrentSelection(match1, animate: false)
+        view.highlightSelection(nil)
+        #expect(receivedKind == .highlight)
+        #expect(receivedSelection?.selectedText.contains("市场洞察") == true)
+        #expect(view.currentSelection == nil)
+        
+        // 2. Underline shortcut (Ctrl+Cmd+U) with text selected
+        let match2 = try #require(doc.findString("智能问答", withOptions: []).first)
+        view.setCurrentSelection(match2, animate: false)
+        view.underlineSelection(nil)
+        #expect(receivedKind == .underline)
+        #expect(receivedSelection?.selectedText.contains("智能问答") == true)
+        #expect(view.currentSelection == nil)
+        
+        // 3. Strikethrough shortcut (Ctrl+Cmd+S) with text selected
+        let match3 = try #require(doc.findString("文档创作", withOptions: []).first)
+        view.setCurrentSelection(match3, animate: false)
+        view.strikeoutSelection(nil)
+        #expect(receivedKind == .strikeout)
+        #expect(receivedSelection?.selectedText.contains("文档创作") == true)
+        #expect(view.currentSelection == nil)
+        
+        // 4. Highlight shortcut with NO selection toggles tool
+        view.annotationTool = .selection
+        view.highlightSelection(nil)
+        #expect(view.annotationTool == .highlight)
+    }
 }
 
     @Test(.enabled(if: mutoolIsAvailable, "Requires the mutool executable")) @MainActor

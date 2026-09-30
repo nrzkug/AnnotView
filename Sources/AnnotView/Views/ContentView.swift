@@ -93,6 +93,11 @@ struct ContentView: View {
         } message: {
             Text(documentManager.errorMessage ?? "Unknown error")
         }
+        .onReceive(NotificationCenter.default.publisher(for: .annotViewToolDidChange)) { notification in
+            if let tool = notification.userInfo?["tool"] as? AnnotationTool {
+                annotationTool = tool
+            }
+        }
     }
 
     private var workspace: some View {

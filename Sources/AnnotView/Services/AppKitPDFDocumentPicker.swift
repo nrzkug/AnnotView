@@ -6,6 +6,11 @@ final class AppKitPDFDocumentPicker: PDFDocumentPicking {
     private var activePanel: NSOpenPanel?
 
     func pickDocument() -> URL? {
+        guard activePanel == nil,
+              NSApp.modalWindow == nil,
+              !NSApp.windows.contains(where: { $0 is NSOpenPanel && $0.isVisible }) else {
+            return nil
+        }
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.pdf]
         panel.allowsMultipleSelection = false

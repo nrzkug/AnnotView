@@ -7,6 +7,9 @@ final class AnnotationPDFView: PDFView, @preconcurrency PDFPageOverlayViewProvid
         didSet {
             guard oldValue != annotationTool else { return }
             window?.invalidateCursorRects(for: self)
+            if let kind = annotationTool.markupKind {
+                createMarkupFromActiveSelection(kind: kind)
+            }
         }
     }
     var onCreateMarkupRequest: (@MainActor (Annotation.Kind, PDFMarkupSelection) -> Void)?
@@ -28,6 +31,34 @@ final class AnnotationPDFView: PDFView, @preconcurrency PDFPageOverlayViewProvid
     private var scrollObserver: NSObjectProtocol?
     private var dragState: (annotation: Annotation, page: PDFPage, startViewPoint: CGPoint, startBounds: CGRect)?
     private let pageOverlayViews = NSHashTable<AnnotationPageOverlayView>.weakObjects()
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        disableDocumentAnalysis()
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        disableDocumentAnalysis()
+    }
+
+    override var document: PDFDocument? {
+        didSet {
+            disableDocumentAnalysis()
+        }
+    }
+
+    func disableDocumentAnalysis() {
+        if responds(to: Selector(("setDocumentAnalysisEnabled:"))) {
+            setValue(false, forKey: "documentAnalysisEnabled")
+        }
+        if responds(to: Selector(("setFormDetectionEnabled:"))) {
+            setValue(false, forKey: "formDetectionEnabled")
+        }
+        if responds(to: Selector(("setEnableDataDetectors:"))) {
+            setValue(false, forKey: "enableDataDetectors")
+        }
+    }
 
     var selectedAnnotationID: UUID? {
         didSet {
@@ -242,10 +273,8 @@ final class AnnotationPDFView: PDFView, @preconcurrency PDFPageOverlayViewProvid
         }
         super.mouseUp(with: event)
         guard !suppressesMarkupOnMouseUp,
-              let kind = annotationTool.markupKind,
-              let selection = markupSelection() else { return }
-        onCreateMarkupRequest?(kind, selection)
-        clearSelection()
+              let kind = annotationTool.markupKind else { return }
+        createMarkupFromActiveSelection(kind: kind)
     }
 
     private func updateDrag(to viewPoint: CGPoint) {
@@ -323,9 +352,26 @@ final class AnnotationPDFView: PDFView, @preconcurrency PDFPageOverlayViewProvid
         guard let document, let selection = currentSelection else { return nil }
         var quadsByPage: [Int: [PDFMarkupQuad]] = [:]
 
-        for line in selection.selectionsByLine() {
+        let lines = selection.selectionsByLine()
+        for line in lines {
             for page in line.pages {
                 let bounds = line.bounds(for: page)
+                guard bounds.width > 0.01, bounds.height > 0.01 else { continue }
+                let pageIndex = document.index(for: page)
+                quadsByPage[pageIndex, default: []].append(
+                    PDFMarkupQuad(
+                        topLeft: CGPoint(x: bounds.minX, y: bounds.maxY),
+                        topRight: CGPoint(x: bounds.maxX, y: bounds.maxY),
+                        bottomLeft: CGPoint(x: bounds.minX, y: bounds.minY),
+                        bottomRight: CGPoint(x: bounds.maxX, y: bounds.minY)
+                    )
+                )
+            }
+        }
+
+        if quadsByPage.isEmpty {
+            for page in selection.pages {
+                let bounds = selection.bounds(for: page)
                 guard bounds.width > 0.01, bounds.height > 0.01 else { continue }
                 let pageIndex = document.index(for: page)
                 quadsByPage[pageIndex, default: []].append(
@@ -347,15 +393,15 @@ final class AnnotationPDFView: PDFView, @preconcurrency PDFPageOverlayViewProvid
     }
 
     @objc private func addHighlightFromMenu(_ sender: Any?) {
-        createMarkupFromMenu(kind: .highlight)
+        highlightSelection(sender)
     }
 
     @objc private func addUnderlineFromMenu(_ sender: Any?) {
-        createMarkupFromMenu(kind: .underline)
+        underlineSelection(sender)
     }
 
     @objc private func addStrikeoutFromMenu(_ sender: Any?) {
-        createMarkupFromMenu(kind: .strikeout)
+        strikeoutSelection(sender)
     }
 
     @objc private func editAnnotationFromMenu(_ sender: Any?) {
@@ -456,8 +502,14 @@ final class AnnotationPDFView: PDFView, @preconcurrency PDFPageOverlayViewProvid
         guard let page = page(for: viewPoint, nearest: false) else { return false }
         let pagePoint = convert(viewPoint, to: page)
         let characterIndex = page.characterIndex(at: pagePoint)
-        guard characterIndex != NSNotFound else { return false }
-        return page.characterBounds(at: characterIndex).insetBy(dx: -0.5, dy: -0.5).contains(pagePoint)
+        if characterIndex != NSNotFound && page.characterBounds(at: characterIndex).insetBy(dx: -0.5, dy: -0.5).contains(pagePoint) {
+            return true
+        }
+        if let wordSelection = page.selectionForWord(at: pagePoint),
+           wordSelection.bounds(for: page).insetBy(dx: -1, dy: -1).contains(pagePoint) {
+            return true
+        }
+        return false
     }
 
     private func annotationTarget(at viewPoint: CGPoint) -> (annotation: Annotation, page: PDFPage)? {
@@ -482,10 +534,56 @@ final class AnnotationPDFView: PDFView, @preconcurrency PDFPageOverlayViewProvid
         menu.addItem(item)
     }
 
-    private func createMarkupFromMenu(kind: Annotation.Kind) {
-        guard let selection = markupSelection() else { return }
+    @discardableResult
+    func createMarkupFromActiveSelection(kind: Annotation.Kind) -> Bool {
+        guard let selection = markupSelection() else { return false }
         onCreateMarkupRequest?(kind, selection)
         clearSelection()
+        return true
+    }
+
+    @objc func highlightSelection(_ sender: Any?) {
+        if !createMarkupFromActiveSelection(kind: .highlight) {
+            annotationTool = .highlight
+            NotificationCenter.default.post(
+                name: .annotViewToolDidChange,
+                object: nil,
+                userInfo: ["tool": AnnotationTool.highlight]
+            )
+        }
+    }
+
+    @objc func underlineSelection(_ sender: Any?) {
+        if !createMarkupFromActiveSelection(kind: .underline) {
+            annotationTool = .underline
+            NotificationCenter.default.post(
+                name: .annotViewToolDidChange,
+                object: nil,
+                userInfo: ["tool": AnnotationTool.underline]
+            )
+        }
+    }
+
+    @objc func strikeoutSelection(_ sender: Any?) {
+        if !createMarkupFromActiveSelection(kind: .strikeout) {
+            annotationTool = .strikeout
+            NotificationCenter.default.post(
+                name: .annotViewToolDidChange,
+                object: nil,
+                userInfo: ["tool": AnnotationTool.strikeout]
+            )
+        }
+    }
+
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        switch menuItem.action {
+        case #selector(highlightSelection(_:)),
+             #selector(underlineSelection(_:)),
+             #selector(strikeoutSelection(_:)):
+            return document != nil
+        default:
+            return true
+        }
     }
 
 }

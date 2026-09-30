@@ -121,6 +121,12 @@ struct MuPDFAnnotationParser: AnnotationParsing {
                     return CGPoint(x: quad[index], y: quad[index + 1]).applying(transform)
                 }
             }
+            let bounds = transformedBounds(source.bounds, using: transform)
+            if (kind == .highlight || kind == .underline || kind == .strikeout),
+               points.isEmpty,
+               bounds.width < 0.5 || bounds.height < 0.5 || bounds.width > 10_000 || bounds.height > 10_000 {
+                return nil
+            }
             return Annotation(
                 sourceID: source.sourceID,
                 // Acrobat models replacement edits as a Caret parent plus an IRT
@@ -129,7 +135,7 @@ struct MuPDFAnnotationParser: AnnotationParsing {
                 statusTargetSourceID: acrobatChangeParent?.sourceID ?? source.sourceID,
                 kind: kind,
                 pageIndex: page.pageIndex,
-                bounds: transformedBounds(source.bounds, using: transform),
+                bounds: bounds,
                 quadPoints: points,
                 contents: source.contents?.nilIfEmpty ?? acrobatChangeParent?.contents?.nilIfEmpty,
                 author: source.author?.nilIfEmpty ?? acrobatChangeParent?.author?.nilIfEmpty,

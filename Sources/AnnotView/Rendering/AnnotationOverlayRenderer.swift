@@ -140,6 +140,11 @@ enum AnnotationOverlayRenderer {
             // Text markup lines must never guess their position from Rect.
             guard annotation.kind == .highlight else { return [] }
             let rect = annotation.bounds
+            guard rect.width > 0.5, rect.height > 0.5,
+                  rect.width < 10_000, rect.height < 10_000,
+                  rect.minX.isFinite, rect.minY.isFinite else {
+                return []
+            }
             return [[
                 CGPoint(x: rect.minX, y: rect.maxY),
                 CGPoint(x: rect.maxX, y: rect.maxY),
