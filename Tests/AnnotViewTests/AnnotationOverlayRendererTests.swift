@@ -725,48 +725,6 @@ struct MuPDFAnnotationParserTests {
     }
 }
 
-struct CLIInstallerTests {
-    @Test @MainActor
-    func installsSymlinkIntoPathAndUninstallsCleanly() throws {
-        let fileManager = FileManager.default
-        let root = fileManager.temporaryDirectory
-            .appendingPathComponent("CLIInstallerTest-\(UUID().uuidString)", isDirectory: true)
-        defer { try? fileManager.removeItem(at: root) }
-
-        // A fake app-bundle-shaped source with annotool inside Resources.
-        let resources = root.appendingPathComponent("Resources", isDirectory: true)
-        try fileManager.createDirectory(at: resources, withIntermediateDirectories: true)
-        let annotoolURL = resources.appendingPathComponent("annotool")
-        try "#! /usr/bin/env python3\nprint('annotool')\n".write(
-            to: annotoolURL, atomically: true, encoding: .utf8
-        )
-
-        let binDir = root.appendingPathComponent("bin", isDirectory: true)
-        try fileManager.createDirectory(at: binDir, withIntermediateDirectories: true)
-
-        let installer = CLIInstaller(
-            annotoolURL: annotoolURL,
-            binCandidates: [binDir],
-            pathCheckEnabled: false
-        )
-        #expect(!installer.isInstalled)
-
-        #expect(installer.install())
-        let symlink = binDir.appendingPathComponent("annotool")
-        #expect(installer.isInstalled)
-        #expect(fileManager.fileExists(atPath: symlink.path))
-        #expect(try fileManager.destinationOfSymbolicLink(atPath: symlink.path)
-            == annotoolURL.path)
-        // No copies were made: the symlink points into the source directory.
-        #expect(try fileManager.contentsOfDirectory(atPath: resources.path).count == 1)
-
-        #expect(installer.uninstall())
-        #expect(!installer.isInstalled)
-        #expect(!fileManager.fileExists(atPath: symlink.path))
-    }
-}
-
-
 struct AnnotationColorMemoryTests {
     @Test @MainActor
     func remembersLastUsedColorPerKind() {

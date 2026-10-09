@@ -13,7 +13,6 @@ I built AnnotView for my own workflow: my advisor reviews papers in Adobe Acroba
 - Renders highlights, underlines, strikeouts, text notes, and Insert-Text carets.
 - Creates and edits Acrobat-compatible highlights, underlines, strikethroughs, sticky notes, and insert-text markers.
 - Supports Acrobat review states: Accepted, Rejected, Cancelled, and Completed.
-- Ships an `annotool` CLI for reading and writing Acrobat annotations from a terminal or AI agent.
 
 ## Requirements
 
@@ -25,31 +24,13 @@ Download the macOS ZIP from Releases, unzip it, and move `AnnotView.app` to Appl
 
 ## Run and build
 
-Building from source requires `brew install mupdf`.
+Building from source requires `brew install mupdf` (build-time only — `Scripts/package.sh` bundles `mutool` and all its libraries into the app, so installed copies do **not** need mupdf or Homebrew).
 
 Build from source:
 
 ```sh
 swift build -c release --product AnnotView
 ```
-
-## annotool CLI and AI skill
-
-`annotool` reads and writes Acrobat annotations from the command line (install it from **Settings → Command Line Tool**).
-
-The `annotview-pdf-annotations` agent skill (in `skills/`) teaches AI agents to use it. Install the skill one of two ways:
-
-1. Copy the skill folder into your agent's skill directory:
-
-   ```sh
-   cp -R skills/annotview-pdf-annotations ~/.pi/agent/skills/
-   ```
-
-2. Install with the GitHub CLI:
-
-   ```sh
-   gh skill install nrzkug/AnnotView
-   ```
 
 ## License
 
