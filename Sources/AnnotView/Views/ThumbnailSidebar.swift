@@ -70,6 +70,12 @@ private struct PageThumbnailItem: View {
     @EnvironmentObject private var documentManager: PDFDocumentManager
     @State private var thumbnail: NSImage?
 
+    // Fixed-height media box so the row keeps a constant height whether the
+    // thumbnail is still loading or has arrived. Variable-height rows make the
+    // hosting view resize during NSTableCellView layout, which intermittently
+    // throws an AppKit constraint exception on document open (macOS 26).
+    private static let mediaHeight: CGFloat = 132
+
     var body: some View {
         VStack(spacing: 6) {
             Group {
@@ -89,6 +95,8 @@ private struct PageThumbnailItem: View {
                         }
                 }
             }
+            .frame(height: Self.mediaHeight)
+            .frame(maxWidth: .infinity)
             Text("Page \(pageIndex + 1)")
                 .font(.caption)
                 .foregroundStyle(.secondary)
