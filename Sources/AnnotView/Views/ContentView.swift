@@ -62,14 +62,6 @@ struct ContentView: View {
                 annotationToolControl
             }
 
-            if documentManager.isSavingAnnotation {
-                ToolbarItem(placement: .primaryAction) {
-                    ProgressView()
-                        .controlSize(.small)
-                        .help("Saving annotation to the PDF")
-                }
-            }
-
             ToolbarSpacer(.fixed, placement: .primaryAction)
 
             ToolbarItem(placement: .primaryAction) {
