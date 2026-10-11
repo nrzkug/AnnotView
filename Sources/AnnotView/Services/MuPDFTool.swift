@@ -92,10 +92,25 @@ struct MuPDFTool: Sendable {
         if executable == Bundle.main.url(forAuxiliaryExecutable: "mutool") {
             return "Available (app bundle)"
         }
+        if executable.path == Self.repoLocalMutoolPath {
+            return "Available (mupdf-dist build)"
+        }
         if ["/opt/homebrew/bin/mutool", "/usr/local/bin/mutool"].contains(executable.path) {
             return "Available (Homebrew location)"
         }
         return "Available (PATH)"
+    }
+
+    /// Scripts/build-mupdf.sh stages a runnable mutool at
+    /// <repo>/.build/mupdf-dist/bin/mutool. Used when running unbundled from
+    /// Xcode or `swift run` on a machine without Homebrew mupdf.
+    private static var repoLocalMutoolPath: String {
+        let repoRoot = URL(fileURLWithPath: #filePath) // .../Sources/AnnotView/Services/MuPDFTool.swift
+            .deletingLastPathComponent() // Services/
+            .deletingLastPathComponent() // AnnotView/
+            .deletingLastPathComponent() // Sources/
+            .deletingLastPathComponent() // repo root
+        return repoRoot.appendingPathComponent(".build/mupdf-dist/bin/mutool").path
     }
 
     private static func findExecutable() throws -> URL {
@@ -104,6 +119,7 @@ struct MuPDFTool: Sendable {
         if let bundled = Bundle.main.url(forAuxiliaryExecutable: "mutool")?.path {
             candidates.append(bundled)
         }
+        candidates.append(Self.repoLocalMutoolPath)
         candidates += ["/opt/homebrew/bin/mutool", "/usr/local/bin/mutool"]
         if let path = ProcessInfo.processInfo.environment["PATH"] {
             candidates += path.split(separator: ":").map { "\($0)/mutool" }

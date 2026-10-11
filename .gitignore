@@ -28,3 +28,6 @@ xcuserdata/
 # Python
 __pycache__/
 *.pyc
+
+# Minimal MuPDF source build cache (Scripts/build-mupdf.sh)
+/.mupdf-cache/

@@ -24,13 +24,18 @@ Download the macOS ZIP from Releases, unzip it, and move `AnnotView.app` to Appl
 
 ## Run and build
 
-Building from source requires `brew install mupdf` (build-time only — `Scripts/package.sh` bundles `mutool` and all its libraries into the app, so installed copies do **not** need mupdf or Homebrew).
-
-Build from source:
+Requires only Xcode Command Line Tools.
 
 ```sh
+Scripts/package.sh    # build + stage dist/AnnotView.app; add --stage to skip install/launch
+
+# Direct SwiftPM builds need the bundled MuPDF built once first:
+Scripts/build-mupdf.sh
 swift build -c release --product AnnotView
+swift test
 ```
+
+`Scripts/build-mupdf.sh` compiles a minimal MuPDF from a pinned tarball (cached in `.mupdf-cache/`); the app bundles `mutool` + a single `libmupdf.dylib`, so installed copies need nothing else.
 
 ## License
 

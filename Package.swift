@@ -17,11 +17,16 @@ let package = Package(
             path: "Sources/CMuPDF",
             publicHeadersPath: "include",
             cSettings: [
-                .headerSearchPath("include"),
-                .unsafeFlags(["-I/opt/homebrew/include"])
+                .headerSearchPath("include")
             ],
             linkerSettings: [
-                .unsafeFlags(["-L/opt/homebrew/lib", "-lmupdf"])
+                // Link the minimal source-built MuPDF dylib (Scripts/build-mupdf.sh).
+                // Absolute path derived from #filePath: relative -L paths break
+                // under SwiftPM's xcodebuild backend, which runs from a parent dir.
+                .unsafeFlags([
+                    "-L\(#filePath.dropLast("/Package.swift".count))/.build/mupdf-dist/lib",
+                    "-lmupdf"
+                ])
             ]
         ),
         .executableTarget(

@@ -19,6 +19,9 @@ if [[ "${1:-}" == "--stage" ]]; then STAGE_ONLY=1; fi
 STAGING="$ROOT/dist/$APP_NAME.app"
 DEST="/Applications/$APP_NAME.app"
 
+echo "==> Preparing minimal MuPDF build (headers + lib for linking)"
+"$ROOT/Scripts/build-mupdf.sh"
+
 echo "==> Building release binary"
 swift build -c release --product "$APP_NAME"
 
@@ -55,74 +58,25 @@ if [[ -d "$BIN_DIR/Sparkle.framework" ]]; then
   cp -R "$BIN_DIR/Sparkle.framework" "$STAGING/Contents/Frameworks/Sparkle.framework"
 fi
 
-# Bundle the full MuPDF stack: the mutool executable plus the transitive
-# closure of all Homebrew dylibs it (and libmupdf) depend on, rewritten to
-# @rpath so the app runs on machines without Homebrew or mupdf installed.
-MUPDF_PREFIX="/opt/homebrew/opt/mupdf"
-MUPDF_DYLIB="$MUPDF_PREFIX/lib/libmupdf.dylib"
-MUTOOL_BIN="$MUPDF_PREFIX/bin/mutool"
+# Bundle the minimal source-built MuPDF stack (Scripts/build-mupdf.sh): a
+# single libmupdf.dylib that depends only on libSystem, plus a small mutool
+# linked against it via @rpath. No Homebrew dylibs are needed at runtime.
+MUPDF_DIST="$ROOT/.build/mupdf-dist"
+MUTOOL_BIN="$MUPDF_DIST/bin/mutool"
+MUPDF_DYLIB="$MUPDF_DIST/lib/libmupdf.dylib"
 if [[ ! -f "$MUTOOL_BIN" || ! -f "$MUPDF_DYLIB" ]]; then
-  echo "ERROR: mupdf not found at $MUPDF_PREFIX (needed at build time: brew install mupdf)" >&2
+  echo "ERROR: build-mupdf.sh did not produce $MUPDF_DIST artifacts" >&2
   exit 1
 fi
 
-echo "==> Bundling mutool and its dylib dependencies"
+echo "==> Bundling mutool and libmupdf.dylib"
 FRAMEWORKS="$STAGING/Contents/Frameworks"
 cp "$MUTOOL_BIN" "$STAGING/Contents/MacOS/mutool"
-chmod +w "$STAGING/Contents/MacOS/mutool"
-
-# Recursive dependency collector: queue starts with the two binaries that get
-# @rpath links; every Homebrew dylib they reference (transitively, whether by
-# absolute path or already-@rpath, as homebrew's brotli does) is copied into
-# Frameworks/ and all references are rewritten to @rpath/<name>.
-resolve_homebrew_lib() {
-  # Find a dylib by basename under /opt/homebrew/opt/*/lib
-  local name="$1" candidate
-  for candidate in /opt/homebrew/opt/*/lib/"$name"; do
-    [[ -f "$candidate" ]] && { printf '%s\n' "$candidate"; return 0; }
-  done
-  return 1
-}
-
-rewrite_and_collect() {
-  local target="$1" dep_ref dep_path dep_name copied
-  while IFS= read -r dep_ref; do
-    case "$dep_ref" in
-      /opt/homebrew/*) dep_path="$dep_ref" ;;
-      @rpath/*)
-        dep_name="$(basename "$dep_ref")"
-        # Skip if we already bundle it or it resolves inside the app staging.
-        [[ -f "$FRAMEWORKS/$dep_name" ]] && continue
-        dep_path="$(resolve_homebrew_lib "$dep_name")" || {
-          echo "ERROR: cannot resolve @rpath dependency $dep_ref of $target" >&2; exit 1;
-        }
-        ;;
-      *) continue ;;
-    esac
-    dep_name="$(basename "$dep_path")"
-    copied="$FRAMEWORKS/$dep_name"
-    install_name_tool -change "$dep_ref" "@rpath/$dep_name" "$target"
-    if [[ ! -f "$copied" ]]; then
-      cp "$dep_path" "$copied"
-      chmod +w "$copied"
-      install_name_tool -id "@rpath/$dep_name" "$copied"
-      rewrite_and_collect "$copied"
-    fi
-  done < <(otool -L "$target" | awk '/^\t(\/opt\/homebrew\/|@rpath\/)/ {print $1}')
-}
-
 cp "$MUPDF_DYLIB" "$FRAMEWORKS/libmupdf.dylib"
-chmod +w "$FRAMEWORKS/libmupdf.dylib"
-install_name_tool -id @rpath/libmupdf.dylib "$FRAMEWORKS/libmupdf.dylib"
+# The staged artifacts already carry @rpath install names/refs from
+# build-mupdf.sh; nothing to rewrite here.
 
-install_name_tool -change "$MUPDF_DYLIB" @rpath/libmupdf.dylib "$STAGING/Contents/MacOS/$APP_NAME"
-install_name_tool -change "$MUPDF_DYLIB" @rpath/libmupdf.dylib "$STAGING/Contents/MacOS/mutool"
-install_name_tool -add_rpath @executable_path/../Frameworks "$STAGING/Contents/MacOS/mutool"
-
-rewrite_and_collect "$FRAMEWORKS/libmupdf.dylib"
-rewrite_and_collect "$STAGING/Contents/MacOS/mutool"
-
-echo "    bundled $(ls "$FRAMEWORKS"/*.dylib | wc -l | tr -d ' ') dylibs + mutool"
+echo "    bundled mutool + libmupdf.dylib"
 
 echo "==> Signing (ad hoc)"
 if [[ -d "$STAGING/Contents/Frameworks/Sparkle.framework" ]]; then
