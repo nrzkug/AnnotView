@@ -82,22 +82,6 @@ struct Annotation: Identifiable, Hashable, Sendable {
         static let green = Color(red: 0.243, green: 0.725, blue: 0.353, alpha: 1)
         static let red = Color(red: 0.9, green: 0.15, blue: 0.12, alpha: 0.9)
 
-        /// Acrobat's per-tool default colors (written to /C and /CA on creation):
-        /// highlight yellow at 0.4 opacity, underline green, strikethrough and
-        /// Insert-Text use Acrobat's soft red, sticky notes are opaque yellow.
-        static func acrobatDefault(for kind: Kind) -> Color {
-            switch kind {
-            case .highlight:
-                Color(red: 1, green: 0.819611, blue: 0, alpha: 0.4)
-            case .underline:
-                Color(red: 0.243, green: 0.725, blue: 0.353, alpha: 1)
-            case .strikeout, .ink, .caret:
-                Color(red: 0.972549, green: 0.392151, blue: 0.392151, alpha: 1)
-            case .note:
-                Color(red: 1, green: 0.819611, blue: 0, alpha: 1)
-            }
-        }
-
         func replacingRGB(red: CGFloat, green: CGFloat, blue: CGFloat) -> Color {
             Color(red: red, green: green, blue: blue, alpha: alpha)
         }

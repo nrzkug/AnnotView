@@ -1,12 +1,7 @@
 import Foundation
 
-/// MuPDF will implement this protocol in Phase 2. PDFKit is intentionally not used here.
+/// Implemented by MuPDFAnnotationParser. PDFKit is intentionally not used here:
+/// it cannot expose PDF object identifiers or Acrobat's review-state fields.
 protocol AnnotationParsing: Sendable {
     func annotations(in documentURL: URL) async throws -> [Annotation]
-}
-
-struct EmptyAnnotationParser: AnnotationParsing {
-    func annotations(in documentURL: URL) async throws -> [Annotation] {
-        []
-    }
 }

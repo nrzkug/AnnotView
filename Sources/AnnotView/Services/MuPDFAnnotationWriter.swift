@@ -1,29 +1,16 @@
-import CMuPDF
 import Foundation
 
 actor MuPDFAnnotationWriter: AnnotationWriting {
     enum WriterError: LocalizedError {
-        case executableNotFound
-        case scriptNotFound
         case unsupportedKind
         case emptySelection
-        case processFailed(status: Int32, message: String)
-        case emptyOutput
 
         var errorDescription: String? {
             switch self {
-            case .executableNotFound:
-                "MuPDF's mutool executable was not found."
-            case .scriptNotFound:
-                "The bundled MuPDF annotation-writing script is missing."
             case .unsupportedKind:
                 "This annotation type cannot be written."
             case .emptySelection:
                 "Select some text before adding text markup."
-            case .processFailed(let status, let message):
-                "MuPDF could not save the annotation (status \(status)): \(message)"
-            case .emptyOutput:
-                "MuPDF did not produce an updated PDF."
             }
         }
     }
@@ -58,8 +45,6 @@ actor MuPDFAnnotationWriter: AnnotationWriting {
         let point: [Double]
     }
 
-    init(executableURL: URL? = nil, scriptURL: URL? = nil) {}
-
     func perform(_ mutations: [AnnotationMutation], in documentURL: URL) async throws {
         guard !mutations.isEmpty else { return }
         let operations = try mutations.map(operationPayload)
@@ -67,36 +52,13 @@ actor MuPDFAnnotationWriter: AnnotationWriting {
     }
 
     private func write(_ payload: Payload, to documentURL: URL) async throws {
-        let temporaryDirectory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("AnnotView-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: temporaryDirectory, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
-
-        let outputURL = temporaryDirectory.appendingPathComponent("annotated.pdf")
-        let payloadData = try JSONEncoder().encode(payload)
-        guard let payloadString = String(data: payloadData, encoding: .utf8) else {
-            throw WriterError.emptyOutput
+        let payloadJSON = String(decoding: try JSONEncoder().encode(payload), as: UTF8.self)
+        try MuPDFBridge.withTemporaryOutput(named: "annotated.pdf") { outputURL in
+            try MuPDFBridge.writeAnnotations(
+                from: documentURL, to: outputURL, operationsJSON: payloadJSON
+            )
+            try MuPDFBridge.replaceAtomically(documentURL, with: outputURL, action: "save annotations")
         }
-
-        var outError: UnsafeMutablePointer<CChar>?
-        let success = documentURL.path.withCString { inPath in
-            outputURL.path.withCString { outPath in
-                payloadString.withCString { opsJSON in
-                    mupdf_bridge_write_annotations(inPath, outPath, opsJSON, &outError)
-                }
-            }
-        }
-        defer {
-            if let outError { mupdf_bridge_free(outError) }
-        }
-        guard success else {
-            let msg = outError.flatMap { String(cString: $0) } ?? "Unknown error"
-            throw WriterError.processFailed(status: 1, message: msg)
-        }
-
-        let updatedData = try Data(contentsOf: outputURL)
-        guard !updatedData.isEmpty else { throw WriterError.emptyOutput }
-        try updatedData.write(to: documentURL, options: .atomic)
     }
 
     private func normalized(_ value: String) -> String {
@@ -184,13 +146,6 @@ actor MuPDFAnnotationWriter: AnnotationWriting {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         return formatter.string(from: date)
-    }
-
-    private static func findScript() throws -> URL {
-        guard let url = MuPDFTool.bundledScript(named: "write_annotation") else {
-            throw WriterError.scriptNotFound
-        }
-        return url
     }
 }
 

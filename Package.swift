@@ -1,6 +1,20 @@
 // swift-tools-version: 6.2
 
+import Foundation
 import PackageDescription
+
+// Fail manifest evaluation with an actionable message when the minimal MuPDF
+// build hasn't been staged — otherwise the first sign of trouble is a cryptic
+// `ld: library 'mupdf' not found` at link time.
+let packageRoot = URL(fileURLWithPath: #filePath).deletingLastPathComponent().path
+let mupdfDylibPath = packageRoot + "/.build/mupdf-dist/lib/libmupdf.dylib"
+if !FileManager.default.fileExists(atPath: mupdfDylibPath) {
+    fatalError("""
+    libmupdf.dylib not found at \(mupdfDylibPath).
+    Run Scripts/build-mupdf.sh once before `swift build` / `swift test`
+    (or just run Scripts/package.sh, which invokes it automatically).
+    """)
+}
 
 let package = Package(
     name: "AnnotView",
@@ -21,10 +35,10 @@ let package = Package(
             ],
             linkerSettings: [
                 // Link the minimal source-built MuPDF dylib (Scripts/build-mupdf.sh).
-                // Absolute path derived from #filePath: relative -L paths break
-                // under SwiftPM's xcodebuild backend, which runs from a parent dir.
+                // Absolute path: relative -L paths break under SwiftPM's
+                // xcodebuild backend, which runs from a parent dir.
                 .unsafeFlags([
-                    "-L\(#filePath.dropLast("/Package.swift".count))/.build/mupdf-dist/lib",
+                    "-L\(packageRoot)/.build/mupdf-dist/lib",
                     "-lmupdf"
                 ])
             ]
@@ -36,7 +50,6 @@ let package = Package(
                 .product(name: "Sparkle", package: "Sparkle")
             ],
             path: "Sources/AnnotView",
-            resources: [.process("Resources")],
             linkerSettings: [
                 .unsafeFlags([
                     "-Xlinker", "-rpath", "-Xlinker", "@executable_path",

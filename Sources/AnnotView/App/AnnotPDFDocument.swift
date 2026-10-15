@@ -1,12 +1,10 @@
 import AppKit
-import Combine
 import SwiftUI
 
 @MainActor
 final class AnnotPDFDocument: NSDocument {
     let documentManager: PDFDocumentManager
     let chromeState: ReaderChromeState
-    private var cancellables = Set<AnyCancellable>()
 
     override init() {
         self.documentManager = PDFDocumentManager()

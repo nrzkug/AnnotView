@@ -1,22 +1,12 @@
-import CMuPDF
 import CoreGraphics
 import Foundation
 
 struct MuPDFAnnotationParser: AnnotationParsing {
     enum ParserError: LocalizedError {
-        case executableNotFound
-        case scriptNotFound
-        case processFailed(status: Int32, message: String)
         case malformedTransform(pageIndex: Int)
 
         var errorDescription: String? {
             switch self {
-            case .executableNotFound:
-                "MuPDF's mutool executable was not found. Install MuPDF with Homebrew or bundle mutool with the app."
-            case .scriptNotFound:
-                "The bundled MuPDF annotation script is missing."
-            case .processFailed(let status, let message):
-                "MuPDF annotation parsing failed (status \(status)): \(message)"
             case .malformedTransform(let pageIndex):
                 "MuPDF returned an invalid coordinate transform for page \(pageIndex + 1)."
             }
@@ -51,38 +41,14 @@ struct MuPDFAnnotationParser: AnnotationParsing {
         let state: String?
     }
 
-    init(executableURL: URL? = nil, scriptURL: URL? = nil) {}
-
     func annotations(in documentURL: URL) async throws -> [Annotation] {
-        var outJSON: UnsafeMutablePointer<CChar>?
-        var outError: UnsafeMutablePointer<CChar>?
-        let success = documentURL.path.withCString { cPath in
-            mupdf_bridge_parse_annotations(cPath, &outJSON, &outError)
-        }
-        defer {
-            if let outJSON { mupdf_bridge_free(outJSON) }
-            if let outError { mupdf_bridge_free(outError) }
-        }
-        guard success, let outJSON else {
-            let msg = outError.flatMap { String(cString: $0) } ?? "Unknown error"
-            throw ParserError.processFailed(status: 1, message: msg)
-        }
-        let data = Data(bytes: outJSON, count: strlen(outJSON))
-        return try Self.decode(data)
+        try Self.decode(MuPDFBridge.annotationsJSON(at: documentURL))
     }
 
     static func decode(_ data: Data) throws -> [Annotation] {
         let payload = try JSONDecoder().decode(Payload.self, from: data)
         guard payload.version == 1 else { return [] }
         return try payload.pages.flatMap(Self.mapPage)
-    }
-
-    private static func findScript() throws -> URL {
-        let url = MuPDFTool.bundledScript(named: "annotations")
-        guard let url else {
-            throw ParserError.scriptNotFound
-        }
-        return url
     }
 
     private static func mapPage(_ page: PagePayload) throws -> [Annotation] {

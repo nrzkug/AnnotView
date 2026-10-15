@@ -5,16 +5,7 @@ import Testing
 @testable import AnnotView
 
 private let acceptancePDFPath = ProcessInfo.processInfo.environment["ANNOTVIEW_TEST_PDF"]
-private let acceptanceMutoolIsAvailable = {
-    let environment = ProcessInfo.processInfo.environment
-    let candidates = [environment["MUTOOL_PATH"]]
-        + (environment["PATH"] ?? "").split(separator: ":").map { "\($0)/mutool" }
-        + ["/opt/homebrew/bin/mutool", "/usr/local/bin/mutool"]
-    return candidates.compactMap { $0 }.contains {
-        FileManager.default.isExecutableFile(atPath: $0)
-    }
-}()
-private let acceptanceTestsAreEnabled = acceptancePDFPath != nil && acceptanceMutoolIsAvailable
+private let acceptanceTestsAreEnabled = acceptancePDFPath != nil
 
 struct AnnotationOverlayRendererTests {
     @Test func groupsAcrobatQuadPointsInSetsOfFour() {
@@ -325,7 +316,7 @@ struct PDFDocumentManagerTests {
 
     @Test(.enabled(
         if: acceptanceTestsAreEnabled,
-        "Requires ANNOTVIEW_TEST_PDF and the mutool executable"
+        "Requires ANNOTVIEW_TEST_PDF"
     )) @MainActor
     func opensAndRendersAcceptancePDFWhenProvided() async throws {
         let path = try #require(acceptancePDFPath)
@@ -690,7 +681,7 @@ struct MuPDFAnnotationParserTests {
 
     @Test(.enabled(
         if: acceptanceTestsAreEnabled,
-        "Requires ANNOTVIEW_TEST_PDF and the mutool executable"
+        "Requires ANNOTVIEW_TEST_PDF"
     ))
     func writesAcrobatStatusToACopyOfTheAcceptancePDF() async throws {
         let path = try #require(acceptancePDFPath)

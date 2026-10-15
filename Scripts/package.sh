@@ -26,19 +26,6 @@ echo "==> Building release binary"
 swift build -c release --product "$APP_NAME"
 
 BIN_DIR="$(swift build -c release --show-bin-path)"
-BUNDLE_SRC="$BIN_DIR/${APP_NAME}_${APP_NAME}.bundle"
-BUNDLE_NAME="$(basename "$BUNDLE_SRC")"
-JS_SRC_DIR="Sources/AnnotView/Resources/MuPDF"
-
-echo "==> Verifying bundled MuPDF scripts match sources"
-for script in annotations write_annotation update_annotation_status strip_annotations; do
-  if ! diff -q "$JS_SRC_DIR/$script.js" "$BUNDLE_SRC/Contents/Resources/$script.js" >/dev/null; then
-    echo "ERROR: $script.js in the built bundle differs from $JS_SRC_DIR/$script.js" >&2
-    echo "       (SwiftPM resources are stale; delete .build and rebuild)" >&2
-    exit 1
-  fi
-done
-echo "    all 4 scripts in sync"
 
 echo "==> Assembling $STAGING"
 rm -rf "$STAGING"
@@ -50,7 +37,6 @@ if [[ -f "AppBundle/$APP_NAME.icns" ]]; then
 else
   cp "AppBundle/AppIcon.png" "$STAGING/Contents/Resources/$APP_NAME.png"
 fi
-cp -R "$BUNDLE_SRC" "$STAGING/Contents/Resources/$BUNDLE_NAME"
 
 # SwiftPM keeps Sparkle alongside the executable. Copy its complete framework
 # (including the relaunch helper) into the app bundle before signing.
@@ -58,31 +44,29 @@ if [[ -d "$BIN_DIR/Sparkle.framework" ]]; then
   cp -R "$BIN_DIR/Sparkle.framework" "$STAGING/Contents/Frameworks/Sparkle.framework"
 fi
 
-# Bundle the minimal source-built MuPDF stack (Scripts/build-mupdf.sh): a
-# single libmupdf.dylib that depends only on libSystem, plus a small mutool
-# linked against it via @rpath. No Homebrew dylibs are needed at runtime.
+# Bundle the minimal source-built MuPDF library (Scripts/build-mupdf.sh): a
+# single libmupdf.dylib that depends only on libSystem. No Homebrew dylibs
+# are needed at runtime.
 MUPDF_DIST="$ROOT/.build/mupdf-dist"
-MUTOOL_BIN="$MUPDF_DIST/bin/mutool"
 MUPDF_DYLIB="$MUPDF_DIST/lib/libmupdf.dylib"
-if [[ ! -f "$MUTOOL_BIN" || ! -f "$MUPDF_DYLIB" ]]; then
+if [[ ! -f "$MUPDF_DYLIB" ]]; then
   echo "ERROR: build-mupdf.sh did not produce $MUPDF_DIST artifacts" >&2
   exit 1
 fi
 
-echo "==> Bundling mutool and libmupdf.dylib"
+echo "==> Bundling libmupdf.dylib"
 FRAMEWORKS="$STAGING/Contents/Frameworks"
-cp "$MUTOOL_BIN" "$STAGING/Contents/MacOS/mutool"
 cp "$MUPDF_DYLIB" "$FRAMEWORKS/libmupdf.dylib"
-# The staged artifacts already carry @rpath install names/refs from
+# The staged artifact already carries an @rpath install name from
 # build-mupdf.sh; nothing to rewrite here.
 
-echo "    bundled mutool + libmupdf.dylib"
+echo "    bundled libmupdf.dylib"
 
 echo "==> Signing (ad hoc)"
 if [[ -d "$STAGING/Contents/Frameworks/Sparkle.framework" ]]; then
   codesign --force --sign - --timestamp=none "$STAGING/Contents/Frameworks/Sparkle.framework"
 fi
-for binary in "$STAGING/Contents/MacOS/mutool" "$FRAMEWORKS"/*.dylib; do
+for binary in "$FRAMEWORKS"/*.dylib; do
   codesign --force --sign - --timestamp=none "$binary"
 done
 codesign --force --sign - --timestamp=none "$STAGING"

@@ -3,18 +3,6 @@ import PDFKit
 import Testing
 @testable import AnnotView
 
-private let mutoolIsAvailable = mutoolURL != nil
-
-private var mutoolURL: URL? {
-    let environment = ProcessInfo.processInfo.environment
-    let candidates = [environment["MUTOOL_PATH"]]
-        + (environment["PATH"] ?? "").split(separator: ":").map { "\($0)/mutool" }
-        + ["/opt/homebrew/bin/mutool", "/usr/local/bin/mutool"]
-    return candidates.compactMap { $0 }.map(URL.init(fileURLWithPath:)).first {
-        FileManager.default.isExecutableFile(atPath: $0.path)
-    }
-}
-
 struct AnnotationCreationTests {
     @Test func editingColorPreservesAnnotationOpacity() {
         let original = Annotation.Color.yellow
@@ -26,7 +14,7 @@ struct AnnotationCreationTests {
         #expect(edited.alpha == original.alpha)
     }
 
-    @Test(.enabled(if: mutoolIsAvailable, "Requires the mutool executable")) @MainActor
+    @Test @MainActor
     func writesAndReopensAcrobatCompatibleHighlight() async throws {
         let temporaryDirectory = FileManager.default.temporaryDirectory
             .appendingPathComponent("AnnotViewCreationTest-\(UUID().uuidString)", isDirectory: true)
@@ -104,7 +92,7 @@ struct AnnotationCreationTests {
         #expect(try await MuPDFAnnotationParser().annotations(in: documentURL).isEmpty)
     }
 
-    @Test(.enabled(if: mutoolIsAvailable, "Requires the mutool executable")) @MainActor
+    @Test @MainActor
     func createsStickyNoteAndTextMarkupKinds() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("AnnotViewKindsTest-\(UUID().uuidString)", isDirectory: true)
@@ -165,7 +153,7 @@ struct AnnotationCreationTests {
         #expect(caret.bounds.width > 0 && caret.bounds.height > 0)
     }
 
-    @Test(.enabled(if: mutoolIsAvailable, "Requires the mutool executable")) @MainActor
+    @Test @MainActor
     func updatesMultipleAnnotationStatusesInOneSave() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("AnnotViewBatchStatusTest-\(UUID().uuidString)", isDirectory: true)
@@ -205,7 +193,7 @@ struct AnnotationCreationTests {
         #expect(updated.allSatisfy { $0.status == .completed })
     }
 
-    @Test(.enabled(if: mutoolIsAvailable, "Requires the mutool executable")) @MainActor
+    @Test @MainActor
     func rejectsAnEntireBatchWhenOneMutationFails() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("AnnotViewAtomicBatchTest-\(UUID().uuidString)", isDirectory: true)
@@ -236,7 +224,7 @@ struct AnnotationCreationTests {
         #expect(try await MuPDFAnnotationParser().annotations(in: documentURL).isEmpty)
     }
 
-    @Test(.enabled(if: mutoolIsAvailable, "Requires the mutool executable")) @MainActor
+    @Test @MainActor
     func supportsMultiStepAnnotationUndoAndRedo() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("AnnotViewHistoryTest-\(UUID().uuidString)", isDirectory: true)
@@ -472,9 +460,8 @@ struct AnnotationCreationTests {
         view.highlightSelection(nil)
         #expect(view.annotationTool == .highlight)
     }
-}
 
-    @Test(.enabled(if: mutoolIsAvailable, "Requires the mutool executable")) @MainActor
+    @Test @MainActor
     func movesAnnotationsToNewRects() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("AnnotViewMoveTest-\(UUID().uuidString)", isDirectory: true)
@@ -540,3 +527,4 @@ struct AnnotationCreationTests {
         #expect(abs(movedCaret.bounds.height - 7.21) < 0.1)
         #expect(abs(movedCaret.bounds.midX - 454.4) < 0.1)
     }
+}

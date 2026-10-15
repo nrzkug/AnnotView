@@ -257,7 +257,6 @@ struct ContentView: View {
     }
 }
 
-
 private extension AnnotationTool {
     var label: String {
         switch self {

@@ -6,13 +6,11 @@
 # Why not Homebrew's mupdf? Its libmupdf.dylib is ~50 MB (the entire Noto font
 # collection is compiled into the library as static data) and it drags in a
 # ~15 MB closure of optional-feature dylibs (tesseract OCR, leptonica, glib,
-# libcrypto, ...). AnnotView only needs `mutool run` + the fz_* JSON helpers,
-# none of which use embedded fonts or OCR. The minimal build below produces a
-# single ~6 MB libmupdf.dylib that depends only on libSystem, plus a ~460 KB
-# mutool that links it via @rpath.
+# libcrypto, ...). AnnotView only needs the fz_* JSON helpers used by the C
+# bridge, none of which use embedded fonts or OCR. The minimal build below
+# produces a single ~6 MB libmupdf.dylib that depends only on libSystem.
 #
-# Artifacts (all LC ids/refs rewritten to @rpath):
-#   .build/mupdf-dist/bin/mutool          rpaths: ../lib, ../Frameworks (bundle + standalone)
+# Artifacts:
 #   .build/mupdf-dist/lib/libmupdf.dylib  id: @rpath/libmupdf.dylib
 # Public headers are vendored in Sources/CMuPDF/include/mupdf (checked into git).
 #
@@ -31,8 +29,7 @@ DIST="$ROOT/.build/mupdf-dist"
 SRC="$CACHE/mupdf-${MUPDF_VERSION}-source"
 # Flags that shape the build (also part of the cache key):
 #   tofu*        drop embedded Noto/SIL/CJK fallback fonts (AnnotView renders via PDFKit)
-#   html/extract/xps/svg/brotli=no  drop engines unused by the annotation scripts
-#   mujs stays on  — required by `mutool run`
+#   html/extract/xps/svg/brotli=no  drop engines unused by the C bridge
 MUPDF_FLAGS="shared=yes build=release tofu=yes tofu_cjk=yes tofu_cjk_ext=yes tofu_cjk_lang=yes html=no extract=no xps=no svg=no brotli=no"
 STAMP="$CACHE/.built-$(echo "$MUPDF_VERSION $MUPDF_FLAGS" | shasum -a 256 | cut -d' ' -f1)"
 
@@ -62,12 +59,11 @@ if [[ ! -f "$STAMP" ]]; then
   rm -rf "$SRC"
   tar -xzf "$TARBALL" -C "$CACHE"
 
-  echo "==> Building minimal libmupdf.dylib + mutool (release, no fonts/OCR)"
-  # `libs` first (the dylib), then `tools` (mutool, linked against the dylib).
-  # Never build the default `all` target: it includes the OpenGL GUI (freeglut),
-  # which fails to compile on stock macOS SDKs.
+  echo "==> Building minimal libmupdf.dylib (release, no fonts/OCR)"
+  # `libs` only: the C bridge links libmupdf.dylib directly. Never build the
+  # default `all` target: it includes the OpenGL GUI (freeglut), which fails
+  # to compile on stock macOS SDKs.
   (cd "$SRC" && make $MUPDF_FLAGS libs -j"$(sysctl -n hw.ncpu)")
-  (cd "$SRC" && make $MUPDF_FLAGS tools -j"$(sysctl -n hw.ncpu)")
 
   touch "$STAMP"
 else
@@ -76,28 +72,19 @@ fi
 
 # Locate the build output dir (name carries the feature suffix).
 OUT_DIR="$(printf '%s\n' "$SRC"/build/shared-release-tofu*/ | head -1)"
-if [[ ! -f "$OUT_DIR/libmupdf.dylib" || ! -f "$OUT_DIR/mutool" ]]; then
+if [[ ! -f "$OUT_DIR/libmupdf.dylib" ]]; then
   echo "ERROR: expected build outputs missing under $OUT_DIR" >&2
   exit 1
 fi
 
 echo "==> Staging artifacts to $DIST"
 rm -rf "$DIST"
-mkdir -p "$DIST/bin" "$DIST/lib"
+mkdir -p "$DIST/lib"
 
 cp "$OUT_DIR/libmupdf.dylib" "$DIST/lib/libmupdf.dylib"
 chmod +w "$DIST/lib/libmupdf.dylib"
 # Canonical install name so anything linking against it records @rpath directly.
 install_name_tool -id @rpath/libmupdf.dylib "$DIST/lib/libmupdf.dylib"
-
-cp "$OUT_DIR/mutool" "$DIST/bin/mutool"
-chmod +w "$DIST/bin/mutool"
-OLD_REF="$(otool -L "$DIST/bin/mutool" | awk '/libmupdf\.dylib/{print $1; exit}')"
-install_name_tool -change "$OLD_REF" @rpath/libmupdf.dylib "$DIST/bin/mutool"
-# Three rpaths so mutool runs both in the app bundle (MacOS/ + ../Frameworks/)
-# and standalone from the dist layout (bin/ + ../lib/).
-install_name_tool -add_rpath @executable_path/../lib "$DIST/bin/mutool"
-install_name_tool -add_rpath @executable_path/../Frameworks "$DIST/bin/mutool"
 
 # Public headers were checked against MUPDF_VERSION above; nothing else to copy.
 
@@ -116,7 +103,6 @@ for d in \
 done
 
 codesign --force --sign - "$DIST/lib/libmupdf.dylib" >/dev/null 2>&1 || true
-codesign --force --sign - "$DIST/bin/mutool" >/dev/null 2>&1 || true
 
 echo "==> mupdf-dist ready:"
-ls -la "$DIST/lib" "$DIST/bin"
+ls -la "$DIST/lib"

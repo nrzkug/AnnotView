@@ -27,7 +27,6 @@ final class AnnotationPopoverCoordinator: NSObject, NSPopoverDelegate {
     private var popover: NSPopover?
     private var activePopover: ActivePopover?
     private var pendingShow: PendingShow?
-    private var isClosing = false
     private var hoverDismissTask: Task<Void, Never>?
     private var positionedAnnotation: Annotation?
     private weak var positionedPage: PDFPage?
@@ -90,7 +89,6 @@ final class AnnotationPopoverCoordinator: NSObject, NSPopoverDelegate {
 
     func popoverDidClose(_ notification: Notification) {
         guard let closedPopover = notification.object as? NSPopover else { return }
-        isClosing = false
         if closedPopover === popover { popover = nil }
         activePopover = nil
         hoverDismissTask?.cancel()
@@ -269,7 +267,6 @@ final class AnnotationPopoverCoordinator: NSObject, NSPopoverDelegate {
         activePopover = nil
         positionedAnnotation = nil
         positionedPage = nil
-        if closingPopover != nil { isClosing = true }
         closingPopover?.close()
     }
 

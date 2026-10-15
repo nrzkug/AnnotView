@@ -103,9 +103,6 @@ final class AnnotViewApplicationModel: ObservableObject {
         }
     }
 
-    func open(url: URL) async {
-        NSDocumentController.shared.openDocument(withContentsOf: url, display: true) { _, _, _ in }
-    }
 }
 
 final class AnnotViewAppDelegate: NSObject, NSApplicationDelegate {

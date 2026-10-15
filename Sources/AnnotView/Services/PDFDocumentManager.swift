@@ -85,7 +85,6 @@ final class PDFDocumentManager: ObservableObject {
     private let recentDocumentStore: any RecentDocumentStoring
     private let documentPicker: any PDFDocumentPicking
     private let documentBuilder: any PDFDocumentBuilding
-    private var checkedCommandLineForDocument = false
     private var annotationLoadID = UUID()
     private var annotationUndoHistory: [AnnotationHistoryOperation] = []
     private var annotationRedoHistory: [AnnotationHistoryOperation] = []
@@ -120,20 +119,6 @@ final class PDFDocumentManager: ObservableObject {
 
     func requestOpenPanel() {
         Task { await presentOpenPanel() }
-    }
-
-    func cancelOpenPanel() {
-        documentPicker.cancel()
-    }
-
-    func openCommandLineDocumentIfPresent() async {
-        guard !checkedCommandLineForDocument else { return }
-        checkedCommandLineForDocument = true
-        if let path = CommandLine.arguments.dropFirst().first(where: {
-            !$0.hasPrefix("-") && $0.lowercased().hasSuffix(".pdf")
-        }) {
-            await open(url: URL(fileURLWithPath: path))
-        }
     }
 
     func presentOpenPanel() async {

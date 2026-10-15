@@ -2,7 +2,7 @@ import AppKit
 
 enum AppDiagnostics {
     /// Deliberately excludes file names, paths, comment text, and raw errors,
-    /// which can contain private document content or MuPDF command arguments.
+    /// which can contain private document content.
     @MainActor
     static func copy(
         documentManager: PDFDocumentManager,
@@ -18,7 +18,6 @@ enum AppDiagnostics {
         Architecture: \(architecture)
         Appearance: \(appearance.label)
         Updates: \(updater.diagnosticStatus)
-        MuPDF: \(MuPDFTool.diagnosticAvailability)
         Document open: \(documentManager.document != nil)
         Pages: \(documentManager.pageCount)
         Current page: \(documentManager.document == nil ? "None" : String(documentManager.selectedPageIndex + 1))

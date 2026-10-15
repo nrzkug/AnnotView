@@ -41,7 +41,6 @@ struct PDFKitPageView: NSViewRepresentable {
         view.selectedAnnotationID = selectedAnnotationID
         view.onSelectAnnotationRequest = onSelectAnnotationRequest
         view.onDeselectAnnotationRequest = onDeselectAnnotationRequest
-        disableDocumentAnalysis(on: view)
         configureAnnotationInteraction(on: view)
         context.coordinator.observe(view)
         return view
@@ -51,7 +50,6 @@ struct PDFKitPageView: NSViewRepresentable {
         if view.document !== document {
             view.resetAnnotationInteraction()
             view.document = document
-            disableDocumentAnalysis(on: view)
             view.autoScales = false
             let fittedScale = view.scaleFactorForSizeToFit
             if fittedScale.isFinite, fittedScale > 0 {
@@ -129,18 +127,6 @@ struct PDFKitPageView: NSViewRepresentable {
         view.onUpdateAnnotation = onUpdateAnnotation
         view.onMoveAnnotationRequest = onMoveAnnotationRequest
         view.onDeleteAnnotation = onDeleteAnnotation
-    }
-
-    private func disableDocumentAnalysis(on view: AnnotationPDFView) {
-        if view.responds(to: Selector(("setDocumentAnalysisEnabled:"))) {
-            view.setValue(false, forKey: "documentAnalysisEnabled")
-        }
-        if view.responds(to: Selector(("setFormDetectionEnabled:"))) {
-            view.setValue(false, forKey: "formDetectionEnabled")
-        }
-        if view.responds(to: Selector(("setEnableDataDetectors:"))) {
-            view.setValue(false, forKey: "enableDataDetectors")
-        }
     }
 
     @MainActor

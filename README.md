@@ -35,7 +35,7 @@ swift build -c release --product AnnotView
 swift test
 ```
 
-`Scripts/build-mupdf.sh` compiles a minimal MuPDF from a pinned tarball (cached in `.mupdf-cache/`); the app bundles `mutool` + a single `libmupdf.dylib`, so installed copies need nothing else.
+`Scripts/build-mupdf.sh` compiles a minimal MuPDF from a pinned tarball (cached in `.mupdf-cache/`); the app bundles a single `libmupdf.dylib`, so installed copies need nothing else.
 
 ## License
 
