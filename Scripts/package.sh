@@ -31,6 +31,7 @@ echo "==> Assembling $STAGING"
 rm -rf "$STAGING"
 mkdir -p "$STAGING/Contents/MacOS" "$STAGING/Contents/Resources" "$STAGING/Contents/Frameworks"
 cp "$BIN_DIR/$APP_NAME" "$STAGING/Contents/MacOS/$APP_NAME"
+cp -R "$BIN_DIR/AnnotView_AnnotView.bundle" "$STAGING/Contents/Resources/"
 cp "AppBundle/Info.plist" "$STAGING/Contents/Info.plist"
 if [[ -f "AppBundle/$APP_NAME.icns" ]]; then
   cp "AppBundle/$APP_NAME.icns" "$STAGING/Contents/Resources/$APP_NAME.icns"

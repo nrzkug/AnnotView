@@ -3,6 +3,50 @@ import PDFKit
 
 /// PDFKit draws only page content; this subclass paints engine-neutral annotations on top.
 final class AnnotationPDFView: PDFView, @preconcurrency PDFPageOverlayViewProvider {
+    /// Inset the scrollable document, never the PDF viewport: page content and
+    /// the overlay scroller can extend behind the floating window controls.
+    var topContentInset: CGFloat = 0 {
+        didSet {
+            if oldValue != topContentInset { applyReaderContentInsets() }
+        }
+    }
+
+    override func layout() {
+        super.layout()
+        applyReaderContentInsets()
+    }
+
+    func applyReaderContentInsets() {
+        guard let scrollView = documentView?.enclosingScrollView else { return }
+        scrollView.automaticallyAdjustsContentInsets = false
+        if scrollView.contentInsets.top != topContentInset {
+            var insets = scrollView.contentInsets
+            insets.top = topContentInset
+            scrollView.contentInsets = insets
+        }
+        scrollView.scrollerStyle = .overlay
+        // Keep the overlay track full-height while only the document content
+        // is inset beneath the floating toolbar.
+        scrollView.scrollerInsets = NSEdgeInsets(top: -topContentInset, left: 0, bottom: 0, right: 0)
+    }
+
+    func isWindowDragPoint(_ point: NSPoint) -> Bool {
+        guard topContentInset > 0, bounds.contains(point) else { return false }
+        let distanceFromTop = isFlipped ? point.y - bounds.minY : bounds.maxY - point.y
+        guard distanceFromTop < topContentInset else { return false }
+        // The full-height overlay scroller remains interactive in this band.
+        if let scroller = documentView?.enclosingScrollView?.verticalScroller,
+           !scroller.isHidden,
+           convert(scroller.bounds, from: scroller).contains(point) { return false }
+        return true
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        let localPoint = convert(point, from: superview)
+        if isWindowDragPoint(localPoint) { return self }
+        return super.hitTest(point)
+    }
+
     var annotationTool: AnnotationTool = .selection {
         didSet {
             guard oldValue != annotationTool else { return }
@@ -152,28 +196,21 @@ final class AnnotationPDFView: PDFView, @preconcurrency PDFPageOverlayViewProvid
         mouseTrackingArea = trackingArea
     }
 
-    override func resetCursorRects() {
-        super.resetCursorRects()
-        if annotationTool == .note {
-            addCursorRect(bounds, cursor: .crosshair)
-        }
-    }
-
     override func cursorUpdate(with event: NSEvent) {
         let viewPoint = convert(event.locationInWindow, from: nil)
         guard visibleRect.contains(viewPoint) else { return }
-        let target = annotationTarget(at: viewPoint)
-        if target != nil {
-            NSCursor.pointingHand.set()
-        } else if annotationTool == .note {
-            NSCursor.crosshair.set()
-        } else if annotationTool == .insertText {
-            NSCursor.iBeam.set()
-        } else if isOverText(at: viewPoint) {
-            NSCursor.iBeam.set()
-        } else {
-            NSCursor.arrow.set()
-        }
+        cursor(at: viewPoint).set()
+    }
+
+    func cursor(at viewPoint: CGPoint) -> NSCursor {
+        if isWindowDragPoint(viewPoint) { return .arrow }
+        // Text remains a text target even when it carries a highlight, link,
+        // or other annotation. Do not let annotation hit testing win here.
+        if isOverText(at: viewPoint) { return .iBeam }
+        if annotationTarget(at: viewPoint) != nil { return .pointingHand }
+        if annotationTool == .note { return .crosshair }
+        if annotationTool == .insertText { return .iBeam }
+        return .arrow
     }
 
     override func mouseMoved(with event: NSEvent) {
@@ -189,6 +226,9 @@ final class AnnotationPDFView: PDFView, @preconcurrency PDFPageOverlayViewProvid
                 self?.handleAnnotationPresentation(annotation, on: page, request: .hover)
             }
         )
+        // PDFKit has tracking areas of its own. Reapply our policy on every
+        // move, including moves between glyphs within the same tracking area.
+        cursor(at: viewPoint).set()
     }
 
     override func mouseExited(with event: NSEvent) {
@@ -200,6 +240,12 @@ final class AnnotationPDFView: PDFView, @preconcurrency PDFPageOverlayViewProvid
     override func mouseDown(with event: NSEvent) {
         let viewPoint = convert(event.locationInWindow, from: nil)
         suppressesMarkupOnMouseUp = false
+        if isWindowDragPoint(viewPoint), let window {
+            suppressesMarkupOnMouseUp = true
+            interactionController.clearHover()
+            window.performDrag(with: event)
+            return
+        }
         if let target = annotationTarget(at: viewPoint) {
             suppressesMarkupOnMouseUp = true
             onSelectAnnotationRequest?(target.annotation.id)
@@ -507,6 +553,10 @@ final class AnnotationPDFView: PDFView, @preconcurrency PDFPageOverlayViewProvid
         }
         if let wordSelection = page.selectionForWord(at: pagePoint),
            wordSelection.bounds(for: page).insetBy(dx: -1, dy: -1).contains(pagePoint) {
+            return true
+        }
+        if let lineSelection = page.selectionForLine(at: pagePoint),
+           lineSelection.bounds(for: page).insetBy(dx: -1, dy: -1).contains(pagePoint) {
             return true
         }
         return false

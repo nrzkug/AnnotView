@@ -30,8 +30,10 @@ SRC="$CACHE/mupdf-${MUPDF_VERSION}-source"
 # Flags that shape the build (also part of the cache key):
 #   tofu*        drop embedded Noto/SIL/CJK fallback fonts (AnnotView renders via PDFKit)
 #   html/extract/xps/svg/brotli=no  drop engines unused by the C bridge
+# Keep the bundled library compatible with the app on newer build hosts.
+export MACOSX_DEPLOYMENT_TARGET=26.0
 MUPDF_FLAGS="shared=yes build=release tofu=yes tofu_cjk=yes tofu_cjk_ext=yes tofu_cjk_lang=yes html=no extract=no xps=no svg=no brotli=no"
-STAMP="$CACHE/.built-$(echo "$MUPDF_VERSION $MUPDF_FLAGS" | shasum -a 256 | cut -d' ' -f1)"
+STAMP="$CACHE/.built-$(echo "$MUPDF_VERSION $MUPDF_FLAGS $MACOSX_DEPLOYMENT_TARGET" | shasum -a 256 | cut -d' ' -f1)"
 
 mkdir -p "$CACHE"
 

@@ -50,6 +50,7 @@ let package = Package(
                 .product(name: "Sparkle", package: "Sparkle")
             ],
             path: "Sources/AnnotView",
+            resources: [.process("Resources/ToolbarIcons.xcassets"), .copy("Resources/LICENSE.lucide")],
             linkerSettings: [
                 .unsafeFlags([
                     "-Xlinker", "-rpath", "-Xlinker", "@executable_path",

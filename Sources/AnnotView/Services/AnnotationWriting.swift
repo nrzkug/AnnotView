@@ -3,11 +3,11 @@ import Foundation
 
 enum AnnotationTool: String, CaseIterable, Sendable {
     case selection
+    case insertText
     case highlight
     case underline
     case strikeout
     case note
-    case insertText
 
     var markupKind: Annotation.Kind? {
         switch self {

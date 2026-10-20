@@ -520,13 +520,18 @@ bool mupdf_bridge_write_annotations(const char *input_path, const char *output_p
                 set_common_fields(ctx, caret, name, author, contents, timestamp, color, 3, opacity);
                 finish_appearance(ctx, caret, opacity);
 
-                // Set exact Acrobat leaf appearance
+                // PDFKit supplies unrotated PDF page coordinates. MuPDF's
+                // annotation setter expects transformed page coordinates,
+                // including the crop origin, Y flip, and page rotation.
                 pdf_obj *caret_obj = pdf_annot_obj(ctx, caret);
                 fz_rect caret_rect = {
                     (float)(pt_x - 4.4235), (float)(pt_y - 3.6045),
                     (float)(pt_x + 4.4235), (float)(pt_y + 3.6045)
                 };
-                pdf_set_annot_rect(ctx, caret, caret_rect);
+                fz_rect mbox;
+                fz_matrix ctm;
+                pdf_page_transform(ctx, page, &mbox, &ctm);
+                pdf_set_annot_rect(ctx, caret, fz_transform_rect(caret_rect, ctm));
 
                 char glyph[256];
                 snprintf(glyph, sizeof(glyph),

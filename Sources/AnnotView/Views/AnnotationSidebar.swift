@@ -76,7 +76,6 @@ struct AnnotationSidebar: View {
         statusFilterControls
             .padding(.horizontal, 10)
             .padding(.vertical, 6)
-            .background(sidebarBackground)
     }
 
     private var statusFilterControls: some View {
@@ -103,10 +102,6 @@ struct AnnotationSidebar: View {
 
     private var totalAnnotationCount: Int {
         documentManager.annotations.count
-    }
-
-    private var sidebarBackground: Color {
-        Color(nsColor: .windowBackgroundColor)
     }
 
     private var filteredAnnotationCount: Int {

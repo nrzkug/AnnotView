@@ -1,212 +1,274 @@
 import AppKit
 import SwiftUI
 
-/// A Finder-style content split. The source sidebar remains owned by the outer
-/// NavigationSplitView, while these two ordinary content panes start below the
-/// shared window toolbar.
-struct ReaderContentSplitView<Main: View, Detail: View>: NSViewRepresentable {
-    @Binding var isDetailVisible: Bool
-    let mainMinimumWidth: CGFloat
-    let detailMinimumWidth: CGFloat
-    let detailIdealWidth: CGFloat
-    let detailMaximumWidth: CGFloat
+/// Like Kaka's main split, all three columns extend behind native window
+/// chrome. Annotation tools stay beside the window's inspector toggle.
+struct ReaderContentSplitView<Sidebar: View, Main: View, Inspector: View, Tools: View>: NSViewControllerRepresentable {
+    @Binding var isSidebarVisible: Bool
+    @Binding var isInspectorVisible: Bool
+    @Binding var chromeHeight: CGFloat
+    @ViewBuilder let sidebar: () -> Sidebar
     @ViewBuilder let main: () -> Main
-    @ViewBuilder let detail: () -> Detail
+    @ViewBuilder let inspector: () -> Inspector
+    @ViewBuilder let tools: () -> Tools
 
-    func makeNSView(context: Context) -> ReaderContentSplitNSView<Main, Detail> {
-        let visibility = $isDetailVisible
-        return ReaderContentSplitNSView(
-            main: main(),
-            detail: detail(),
-            isDetailVisible: isDetailVisible,
-            mainMinimumWidth: mainMinimumWidth,
-            detailMinimumWidth: detailMinimumWidth,
-            detailIdealWidth: detailIdealWidth,
-            detailMaximumWidth: detailMaximumWidth,
-            onRequestCollapse: { visibility.wrappedValue = false }
+    func makeNSViewController(context: Context) -> ReaderSplitViewController<Sidebar, Main, Inspector, Tools> {
+        let sidebarVisibility = $isSidebarVisible
+        let inspectorVisibility = $isInspectorVisible
+        let height = $chromeHeight
+        return ReaderSplitViewController(
+            sidebar: sidebar(), main: main(), inspector: inspector(), tools: tools(),
+            sidebarVisible: isSidebarVisible, inspectorVisible: isInspectorVisible,
+            onSidebarChange: { sidebarVisibility.wrappedValue = $0 },
+            onInspectorChange: { inspectorVisibility.wrappedValue = $0 },
+            onChromeHeightChange: { height.wrappedValue = $0 }
         )
     }
 
-    func updateNSView(_ view: ReaderContentSplitNSView<Main, Detail>, context: Context) {
-        view.update(main: main(), detail: detail(), isDetailVisible: isDetailVisible)
+    func updateNSViewController(
+        _ controller: ReaderSplitViewController<Sidebar, Main, Inspector, Tools>, context: Context
+    ) {
+        controller.update(
+            sidebar: sidebar(), main: main(), inspector: inspector(), tools: tools(),
+            sidebarVisible: isSidebarVisible, inspectorVisible: isInspectorVisible
+        )
+    }
+
+    func sizeThatFits(
+        _ proposal: ProposedViewSize,
+        nsViewController: ReaderSplitViewController<Sidebar, Main, Inspector, Tools>,
+        context: Context
+    ) -> CGSize? {
+        CGSize(width: proposal.width ?? 1_200, height: proposal.height ?? 760)
     }
 }
 
-final class ReaderContentSplitNSView<Main: View, Detail: View>: NSView {
-    private let mainHost: NSHostingView<Main>
-    private let detailHost: NSHostingView<Detail>
-    private let resizeHandle = ReaderSplitResizeHandle(frame: .zero)
-    private let mainMinimumWidth: CGFloat
-    private let detailMinimumWidth: CGFloat
-    private let detailMaximumWidth: CGFloat
-    private let onRequestCollapse: () -> Void
-    private var retainedDetailWidth: CGFloat
-    private var dragStartDetailWidth: CGFloat?
-    private var isPreviewingCollapse = false
-    private var detailIsVisible: Bool
+private final class ReaderChromeHostingView<Content: View>: NSHostingView<Content> {
+    override var mouseDownCanMoveWindow: Bool { false }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+}
+
+private final class ReaderPaneController<Content: View>: NSViewController {
+    let host: NSHostingView<Content>
+
+    init(rootView: Content) {
+        host = ReaderChromeHostingView(rootView: rootView)
+        host.safeAreaRegions = []
+        host.sizingOptions = []
+        super.init(nibName: nil, bundle: nil)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func loadView() { view = host }
+}
+
+/// Keep actions off NSSplitViewController's toolbar validation path, as Kaka
+/// does, so a dismissed sheet cannot leave a sidebar toggle disabled.
+private final class ReaderToolbarAction: NSObject {
+    private let handler: () -> Void
+    init(_ handler: @escaping () -> Void) { self.handler = handler }
+    @objc func fire() { handler() }
+}
+
+final class ReaderSplitViewController<Sidebar: View, Main: View, Inspector: View, Tools: View>:
+    NSSplitViewController, NSToolbarDelegate {
+    private let sidebarHost: ReaderPaneController<Sidebar>
+    private let mainHost: ReaderPaneController<Main>
+    private let inspectorHost: ReaderPaneController<Inspector>
+    private var toolsHost: NSHostingView<Tools>?
+    private var toolsRoot: Tools
+    private let sidebarItem: NSSplitViewItem
+    private let inspectorItem: NSSplitViewItem
+    private let onSidebarChange: (Bool) -> Void
+    private let onInspectorChange: (Bool) -> Void
+    private let onChromeHeightChange: (CGFloat) -> Void
+    private var observations: [NSKeyValueObservation] = []
+    private var actions: [ReaderToolbarAction] = []
+    private var isSyncing = false
+    private var didInstallChrome = false
+    private var didSetInitialWidths = false
+    private var reportedChromeHeight: CGFloat?
+
+    private var toolsID: NSToolbarItem.Identifier { .init("annotview.annotationTools") }
+    private var sidebarID: NSToolbarItem.Identifier { .init("annotview.sidebar") }
+    private var inspectorID: NSToolbarItem.Identifier { .init("annotview.inspector") }
 
     init(
-        main: Main,
-        detail: Detail,
-        isDetailVisible: Bool,
-        mainMinimumWidth: CGFloat,
-        detailMinimumWidth: CGFloat,
-        detailIdealWidth: CGFloat,
-        detailMaximumWidth: CGFloat,
-        onRequestCollapse: @escaping () -> Void
+        sidebar: Sidebar, main: Main, inspector: Inspector, tools: Tools,
+        sidebarVisible: Bool, inspectorVisible: Bool,
+        onSidebarChange: @escaping (Bool) -> Void,
+        onInspectorChange: @escaping (Bool) -> Void,
+        onChromeHeightChange: @escaping (CGFloat) -> Void
     ) {
-        mainHost = NSHostingView(rootView: main)
-        detailHost = NSHostingView(rootView: detail)
-        self.mainMinimumWidth = mainMinimumWidth
-        self.detailMinimumWidth = detailMinimumWidth
-        self.detailMaximumWidth = detailMaximumWidth
-        self.onRequestCollapse = onRequestCollapse
-        retainedDetailWidth = detailIdealWidth
-        detailIsVisible = isDetailVisible
-        super.init(frame: .zero)
+        sidebarHost = ReaderPaneController(rootView: sidebar)
+        mainHost = ReaderPaneController(rootView: main)
+        inspectorHost = ReaderPaneController(rootView: inspector)
+        toolsRoot = tools
+        sidebarItem = NSSplitViewItem(sidebarWithViewController: sidebarHost)
+        inspectorItem = NSSplitViewItem(inspectorWithViewController: inspectorHost)
+        self.onSidebarChange = onSidebarChange
+        self.onInspectorChange = onInspectorChange
+        self.onChromeHeightChange = onChromeHeightChange
+        super.init(nibName: nil, bundle: nil)
 
-        addSubview(mainHost)
-        addSubview(resizeHandle)
-        addSubview(detailHost)
-        detailHost.isHidden = !isDetailVisible
-        resizeHandle.isHidden = !isDetailVisible
-        resizeHandle.onDragBegan = { [weak self] in
-            guard let self else { return }
-            dragStartDetailWidth = effectiveDetailWidth
-            isPreviewingCollapse = false
+        sidebarItem.canCollapse = true
+        sidebarItem.minimumThickness = 220
+        sidebarItem.maximumThickness = 360
+        sidebarItem.holdingPriority = .init(260)
+        sidebarItem.isCollapsed = !sidebarVisible
+
+        let mainItem = NSSplitViewItem(viewController: mainHost)
+        mainItem.minimumThickness = 420
+        mainItem.allowsFullHeightLayout = true
+
+        inspectorItem.canCollapse = true
+        inspectorItem.minimumThickness = 300
+        inspectorItem.maximumThickness = 720
+        inspectorItem.holdingPriority = .init(260)
+        inspectorItem.isCollapsed = !inspectorVisible
+
+        for item in [sidebarItem, mainItem, inspectorItem] {
+            item.allowsFullHeightLayout = true
+            item.automaticallyAdjustsSafeAreaInsets = false
+            addSplitViewItem(item)
         }
-        resizeHandle.onDrag = { [weak self] translation in
-            guard let self, let dragStartDetailWidth else { return }
-            let proposedWidth = dragStartDetailWidth - translation
-            isPreviewingCollapse = proposedWidth < detailMinimumWidth / 2
-            detailHost.isHidden = isPreviewingCollapse
-            if !isPreviewingCollapse { retainedDetailWidth = clampedDetailWidth(proposedWidth) }
-            needsLayout = true
-            layoutSubtreeIfNeeded()
-        }
-        resizeHandle.onDragEnded = { [weak self] in
-            guard let self else { return }
-            dragStartDetailWidth = nil
-            if isPreviewingCollapse {
-                isPreviewingCollapse = false
-                onRequestCollapse()
-            } else {
-                detailHost.isHidden = false
-                needsLayout = true
+        splitView.autoresizingMask = [.width, .height]
+
+        observations = [sidebarItem, inspectorItem].map { item in
+            item.observe(\.isCollapsed, options: [.new]) { [weak self] _, _ in
+                MainActor.assumeIsolated {
+                    guard let self, !self.isSyncing else { return }
+                    self.onSidebarChange(!self.sidebarItem.isCollapsed)
+                    self.onInspectorChange(!self.inspectorItem.isCollapsed)
+                }
             }
         }
-        resizeHandle.onDoubleClick = { [weak self] in self?.onRequestCollapse() }
     }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-    override func layout() {
-        super.layout()
-        guard detailIsVisible else {
-            mainHost.frame = bounds
+    func update(
+        sidebar: Sidebar, main: Main, inspector: Inspector, tools: Tools,
+        sidebarVisible: Bool, inspectorVisible: Bool
+    ) {
+        sidebarHost.host.rootView = sidebar
+        mainHost.host.rootView = main
+        inspectorHost.host.rootView = inspector
+        toolsRoot = tools
+        toolsHost?.rootView = tools
+        isSyncing = true
+        setCollapsed(!sidebarVisible, for: sidebarItem)
+        setCollapsed(!inspectorVisible, for: inspectorItem)
+        isSyncing = false
+    }
+
+    private func setCollapsed(_ collapsed: Bool, for item: NSSplitViewItem) {
+        // SwiftUI also updates these roots for selection and document changes;
+        // only start an animation when visibility actually changes.
+        guard item.isCollapsed != collapsed else { return }
+        guard view.window != nil,
+              !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else {
+            item.isCollapsed = collapsed
             return
         }
-        let dividerWidth = resizeHandle.intrinsicContentSize.width
-        if isPreviewingCollapse {
-            mainHost.frame = bounds
-            resizeHandle.frame = NSRect(
-                x: max(0, bounds.width - dividerWidth), y: 0,
-                width: dividerWidth, height: bounds.height
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.25
+            item.animator().isCollapsed = collapsed
+        }
+    }
+
+    override func viewDidAppear() {
+        super.viewDidAppear()
+        guard let window = view.window else { return }
+        if !didInstallChrome {
+            didInstallChrome = true
+            let toolbar = NSToolbar(identifier: "annotview.reader")
+            toolbar.delegate = self
+            toolbar.displayMode = .iconOnly
+            toolbar.allowsUserCustomization = false
+            window.toolbarStyle = .unified
+            window.toolbar = toolbar
+            window.titlebarAppearsTransparent = true
+            window.titlebarSeparatorStyle = .none
+        }
+        if !didSetInitialWidths {
+            didSetInitialWidths = true
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.splitView.bounds.width > 0 else { return }
+                self.splitView.setPosition(260, ofDividerAt: 0)
+                if !self.inspectorItem.isCollapsed {
+                    self.splitView.setPosition(self.splitView.bounds.width - 360, ofDividerAt: 1)
+                }
+            }
+        }
+    }
+
+    override func viewDidLayout() {
+        super.viewDidLayout()
+        // SwiftUI may re-pin the representable to contentLayoutRect after a
+        // toolbar change. Match Kaka: expand its host back to the full window.
+        if let host = view.superview, let contentView = view.window?.contentView,
+           host !== contentView, host.frame != contentView.bounds {
+            host.translatesAutoresizingMaskIntoConstraints = true
+            host.autoresizingMask = [.width, .height]
+            host.frame = contentView.bounds
+        }
+        guard let height = view.window?.contentView?.safeAreaInsets.top,
+              reportedChromeHeight != height else { return }
+        reportedChromeHeight = height
+        DispatchQueue.main.async { [weak self] in self?.onChromeHeightChange(height) }
+    }
+
+    func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
+        [sidebarID, .sidebarTrackingSeparator, .flexibleSpace, toolsID, inspectorID]
+    }
+
+    func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
+        toolbarDefaultItemIdentifiers(toolbar)
+    }
+
+    func toolbar(
+        _ toolbar: NSToolbar, itemForItemIdentifier identifier: NSToolbarItem.Identifier,
+        willBeInsertedIntoToolbar flag: Bool
+    ) -> NSToolbarItem? {
+        if identifier == .sidebarTrackingSeparator || identifier == .inspectorTrackingSeparator {
+            return NSTrackingSeparatorToolbarItem(
+                identifier: identifier, splitView: splitView,
+                dividerIndex: identifier == .sidebarTrackingSeparator ? 0 : 1
             )
-            return
         }
-        let detailWidth = effectiveDetailWidth
-        let mainWidth = max(0, bounds.width - dividerWidth - detailWidth)
-        mainHost.frame = NSRect(x: 0, y: 0, width: mainWidth, height: bounds.height)
-        resizeHandle.frame = NSRect(x: mainWidth, y: 0, width: dividerWidth, height: bounds.height)
-        detailHost.frame = NSRect(
-            x: mainWidth + dividerWidth, y: 0,
-            width: detailWidth, height: bounds.height
-        )
-    }
-
-    func update(main: Main, detail: Detail, isDetailVisible: Bool) {
-        mainHost.rootView = main
-        detailHost.rootView = detail
-        guard isDetailVisible != detailIsVisible else { return }
-        if isDetailVisible {
-            detailIsVisible = true
-            detailHost.isHidden = false
-            resizeHandle.isHidden = false
-        } else {
-            retainedDetailWidth = detailHost.frame.width
-            detailIsVisible = false
-            detailHost.isHidden = true
-            resizeHandle.isHidden = true
+        let item = NSToolbarItem(itemIdentifier: identifier)
+        item.isBordered = identifier != toolsID
+        if identifier == toolsID {
+            let host = NSHostingView(rootView: toolsRoot)
+            toolsHost = host
+            item.view = host
+            item.label = "Annotation Tool"
+            return item
         }
-        isPreviewingCollapse = false
-        needsLayout = true
-    }
-
-    private var effectiveDetailWidth: CGFloat { clampedDetailWidth(retainedDetailWidth) }
-
-    private func clampedDetailWidth(_ proposedWidth: CGFloat) -> CGFloat {
-        let available = max(0, bounds.width - mainMinimumWidth - resizeHandle.intrinsicContentSize.width)
-        let maximum = min(detailMaximumWidth, available)
-        let minimum = min(detailMinimumWidth, maximum)
-        return min(max(proposedWidth, minimum), maximum)
-    }
-}
-
-/// The separator stays one system-drawn point wide while its seven-point view
-/// provides a stable resize cursor and drag target.
-final class ReaderSplitResizeHandle: NSView {
-    var onDragBegan: (() -> Void)?
-    var onDrag: ((CGFloat) -> Void)?
-    var onDragEnded: (() -> Void)?
-    var onDoubleClick: (() -> Void)?
-    private let separator = NSBox()
-
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
-        separator.boxType = .separator
-        addSubview(separator)
-    }
-
-    @available(*, unavailable)
-    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-
-    override var intrinsicContentSize: NSSize {
-        NSSize(width: 7, height: NSView.noIntrinsicMetric)
-    }
-
-    override func layout() {
-        super.layout()
-        separator.frame = NSRect(x: floor((bounds.width - 1) / 2), y: 0, width: 1, height: bounds.height)
-    }
-
-    override func resetCursorRects() {
-        super.resetCursorRects()
-        addCursorRect(bounds, cursor: .resizeLeftRight)
-    }
-
-    override func mouseDown(with event: NSEvent) {
-        if event.clickCount == 2 {
-            onDoubleClick?()
-            return
-        }
-        guard let window else { return }
-        let originX = event.locationInWindow.x
-        onDragBegan?()
-        while let next = window.nextEvent(
-            matching: [.leftMouseDragged, .leftMouseUp],
-            until: .distantFuture,
-            inMode: .eventTracking,
-            dequeue: true
-        ) {
-            if next.type == .leftMouseDragged {
-                onDrag?(next.locationInWindow.x - originX)
-            } else if next.type == .leftMouseUp {
-                onDragEnded?()
-                return
+        let isSidebar = identifier == sidebarID
+        guard isSidebar || identifier == inspectorID else { return nil }
+        let action = ReaderToolbarAction { [weak self] in
+            guard let self else { return }
+            if isSidebar {
+                self.onSidebarChange(self.sidebarItem.isCollapsed)
+            } else {
+                self.onInspectorChange(self.inspectorItem.isCollapsed)
             }
         }
-        onDragEnded?()
+        actions.append(action)
+        let icon = Bundle.module.image(forResource: isSidebar ? "panel-left" : "panel-right")
+        icon?.size = NSSize(width: 19, height: 19)
+        icon?.isTemplate = true
+        item.image = icon
+        item.label = isSidebar ? "Pages and Outline" : "Annotations"
+        item.toolTip = isSidebar ? "Show or hide pages and outline" : "Show or hide annotations inspector"
+        item.target = action
+        item.action = #selector(ReaderToolbarAction.fire)
+        item.isBordered = true
+        return item
     }
 }

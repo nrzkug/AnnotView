@@ -6,6 +6,7 @@ final class ReaderChromeState: ObservableObject {
     @Published var thumbnailSidebarIsPresented = true
     @Published var inspectorIsPresented = true
     @Published var searchIsPresented = false
+    @Published var titleBarHeight: CGFloat = 52
 }
 
 /// Native macOS document layout: a source sidebar, PDF workspace, and inspector.
@@ -17,35 +18,27 @@ struct ContentView: View {
     @State private var annotationTool: AnnotationTool = .selection
     @FocusState private var searchFieldIsFocused: Bool
 
-    private enum ColumnWidth {
-        static let sidebarMin: CGFloat = 220
-        static let sidebarIdeal: CGFloat = 260
-        static let sidebarMax: CGFloat = 360
-        static let mainMin: CGFloat = 420
-        static let detailMin: CGFloat = 300
-        static let detailIdeal: CGFloat = 360
-        static let detailMax: CGFloat = 720
-    }
-
-    private var sidebarVisibility: Binding<NavigationSplitViewVisibility> {
-        Binding(
-            get: {
-                chromeState.thumbnailSidebarIsPresented ? .all : .detailOnly
-            },
-            set: { visibility in
-                chromeState.thumbnailSidebarIsPresented = (visibility != .detailOnly)
-            }
-        )
-    }
-
     var body: some View {
-        NavigationSplitView(columnVisibility: sidebarVisibility) {
-            sidebar
-        } detail: {
-            workspace
+        ReaderContentSplitView(
+            isSidebarVisible: $chromeState.thumbnailSidebarIsPresented,
+            isInspectorVisible: $chromeState.inspectorIsPresented,
+            chromeHeight: $chromeState.titleBarHeight
+        ) {
+            ThumbnailSidebar()
+                .padding(.top, chromeState.titleBarHeight)
+                .scrollContentBackground(.hidden)
+        } main: {
+            reader
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(Color(nsColor: .windowBackgroundColor))
+        } inspector: {
+            AnnotationSidebar(statusFilter: $annotationStatusFilter)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .padding(.top, chromeState.titleBarHeight)
+        } tools: {
+            annotationToolControl
         }
-        .navigationSplitViewStyle(.balanced)
-        .navigationTitle(documentManager.documentURL?.lastPathComponent ?? "AnnotView")
+        .ignoresSafeArea(.container, edges: .top)
         .onChange(of: searchController.query) { _, query in
             if query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 searchController.reset()
@@ -55,22 +48,6 @@ struct ContentView: View {
             searchFieldIsFocused = isPresented
             if !isPresented {
                 searchController.query = ""
-            }
-        }
-        .toolbar {
-            ToolbarItem(placement: .primaryAction) {
-                annotationToolControl
-            }
-
-            ToolbarSpacer(.fixed, placement: .primaryAction)
-
-            ToolbarItem(placement: .primaryAction) {
-                Button {
-                    chromeState.inspectorIsPresented.toggle()
-                } label: {
-                    Label("Annotations", systemImage: "sidebar.right")
-                }
-                .help("Show or hide annotations inspector")
             }
         }
         .frame(minWidth: 1_000, minHeight: 620)
@@ -92,58 +69,40 @@ struct ContentView: View {
         }
     }
 
-    private var workspace: some View {
-        ReaderContentSplitView(
-            isDetailVisible: $chromeState.inspectorIsPresented,
-            mainMinimumWidth: ColumnWidth.mainMin,
-            detailMinimumWidth: ColumnWidth.detailMin,
-            detailIdealWidth: ColumnWidth.detailIdeal,
-            detailMaximumWidth: ColumnWidth.detailMax
-        ) {
-            reader.frame(maxWidth: .infinity, maxHeight: .infinity)
-        } detail: {
-            AnnotationSidebar(statusFilter: $annotationStatusFilter)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-        }
-        .overlay(alignment: .top) {
-            Divider().allowsHitTesting(false)
-        }
-    }
-
     @ViewBuilder
     private var annotationToolControl: some View {
-        if #available(macOS 27.0, *) {
-            annotationToolPicker
-                .pickerStyle(.tabs)
-                .labelStyle(.iconOnly)
-                .fixedSize()
-                .disabled(documentManager.document == nil)
-        } else {
-            annotationToolPicker
-                .pickerStyle(.segmented)
-                .labelStyle(.iconOnly)
-                .fixedSize()
-                .disabled(documentManager.document == nil)
+        Group {
+            if #available(macOS 27.0, *) {
+                annotationToolPicker
+                    .pickerStyle(.tabs)
+                    .labelStyle(.iconOnly)
+                    .fixedSize()
+                    .padding(.horizontal, 3)
+                    .padding(.vertical, 2)
+                    .glassEffect(.regular, in: Capsule())
+            } else {
+                annotationToolPicker
+                    .pickerStyle(.segmented)
+                    .labelStyle(.iconOnly)
+                    .fixedSize()
+            }
         }
     }
 
     private var annotationToolPicker: some View {
         Picker("Annotation Tool", selection: $annotationTool) {
             ForEach(AnnotationTool.allCases, id: \.self) { tool in
-                Label(tool.label, systemImage: tool.symbolName)
-                    .help(tool.label)
-                    .tag(tool)
+                Label {
+                    Text(tool.label)
+                } icon: {
+                    Image(tool.iconName, bundle: .module)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(width: 16, height: 16)
+                }
+                .tag(tool)
             }
         }
-    }
-
-    private var sidebar: some View {
-        ThumbnailSidebar()
-            .navigationSplitViewColumnWidth(
-                min: ColumnWidth.sidebarMin,
-                ideal: ColumnWidth.sidebarIdeal,
-                max: ColumnWidth.sidebarMax
-            )
     }
 
     @ViewBuilder
@@ -151,6 +110,7 @@ struct ContentView: View {
         if let document = documentManager.document {
             PDFKitPageView(
                 document: document,
+                topContentInset: chromeState.titleBarHeight,
                 annotations: documentManager.annotations,
                 focusedAnnotation: documentManager.focusedAnnotation,
                 annotationNavigationID: documentManager.annotationNavigationID,
@@ -269,14 +229,14 @@ private extension AnnotationTool {
         }
     }
 
-    var symbolName: String {
+    var iconName: String {
         switch self {
-        case .selection: "cursorarrow"
+        case .selection: "mouse-pointer-2"
         case .highlight: "highlighter"
         case .underline: "underline"
         case .strikeout: "strikethrough"
-        case .note: "note.text.badge.plus"
-        case .insertText: "text.cursor"
+        case .note: "sticky-note"
+        case .insertText: "text-cursor-input"
         }
     }
 }

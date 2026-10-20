@@ -13,7 +13,6 @@ struct AnnotViewApp: App {
                 .preferredColorScheme(model.appearanceSettings.appearance.colorScheme)
         }
         .commands {
-            SidebarCommands()
             ReaderCommands(
                 documentManager: model.documentManager,
                 chromeState: model.chromeState,

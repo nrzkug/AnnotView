@@ -30,6 +30,9 @@ final class AnnotDocumentWindowController: NSWindowController, NSWindowDelegate 
             appearanceSettings: AnnotViewApplicationModel.shared.appearanceSettings
         )
         let hostingController = NSHostingController(rootView: rootView)
+        // The reader owns the top inset. A hosting safe area would otherwise
+        // reserve the native title bar even when its background is transparent.
+        hostingController.safeAreaRegions = []
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1_200, height: 760),
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
@@ -38,8 +41,10 @@ final class AnnotDocumentWindowController: NSWindowController, NSWindowDelegate 
         )
         window.title = document.fileURL?.lastPathComponent ?? "AnnotView"
         window.representedURL = document.fileURL
-        window.minSize = NSSize(width: 720, height: 480)
-        window.toolbarStyle = .unified
+        window.titleVisibility = .hidden
+        window.titlebarAppearsTransparent = true
+        window.titlebarSeparatorStyle = .none
+        window.minSize = NSSize(width: 1_000, height: 620)
         window.tabbingMode = .disallowed
         window.isReleasedWhenClosed = false
         window.contentViewController = hostingController

@@ -3,6 +3,7 @@ import SwiftUI
 
 struct PDFKitPageView: NSViewRepresentable {
     let document: PDFDocument
+    let topContentInset: CGFloat
     let annotations: [Annotation]
     let focusedAnnotation: Annotation?
     let annotationNavigationID: Int
@@ -30,6 +31,7 @@ struct PDFKitPageView: NSViewRepresentable {
 
     func makeNSView(context: Context) -> AnnotationPDFView {
         let view = AnnotationPDFView()
+        view.topContentInset = topContentInset
         view.autoScales = false
         view.displayMode = .singlePageContinuous
         view.displayDirection = .vertical
@@ -47,6 +49,7 @@ struct PDFKitPageView: NSViewRepresentable {
     }
 
     func updateNSView(_ view: AnnotationPDFView, context: Context) {
+        view.topContentInset = topContentInset
         if view.document !== document {
             view.resetAnnotationInteraction()
             view.document = document
@@ -58,6 +61,7 @@ struct PDFKitPageView: NSViewRepresentable {
         }
         view.overlayAnnotations = Dictionary(grouping: annotations, by: \.pageIndex)
         view.observeDocumentScrolling()
+        view.applyReaderContentInsets()
         view.highlightedSelections = searchResults
         view.selectedAnnotationID = selectedAnnotationID
         view.onSelectAnnotationRequest = onSelectAnnotationRequest
