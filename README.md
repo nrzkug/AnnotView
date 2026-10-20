@@ -4,8 +4,6 @@ AnnotView is a lightweight native macOS PDF reader for reviewing Adobe Acrobat a
 
 ![AnnotView showing its native toolbar, five PDF annotation types, and review comments](docs/images/annot_preview.png)
 
-[Download the annotation test document](docs/samples/annotview-review-demo.pdf).
-
 ## Why I built it
 
 I built AnnotView for my own workflow: my advisor reviews papers in Adobe Acrobat, while I only need a fast way to read the annotations and work through the comments. Acrobat feels too heavy for that, and Preview does not always render Acrobat text markup correctly. AnnotView is a small, focused reader—not a full PDF editor.
