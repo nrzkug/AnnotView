@@ -28,6 +28,10 @@ final class AnnotationInteractionController {
         self.onTransientAnnotationChanged = onTransientAnnotationChanged
     }
 
+    /// Short enough to feel immediate, long enough that sweeping the pointer
+    /// across adjacent annotations does not flash a preview.
+    private static let hoverPresentationDelay: Duration = .milliseconds(60)
+
     func updateHover(
         annotation: Annotation?,
         page: PDFPage?,
@@ -64,7 +68,7 @@ final class AnnotationInteractionController {
 
         hoverPresentationTask?.cancel()
         hoverPresentationTask = Task { @MainActor [weak self, weak page] in
-            try? await Task.sleep(for: .milliseconds(200))
+            try? await Task.sleep(for: Self.hoverPresentationDelay)
             guard !Task.isCancelled,
                   self?.hoveredAnnotationID == annotation.id,
                   let page else { return }

@@ -60,6 +60,7 @@ final class AnnotationPDFView: PDFView, @preconcurrency PDFPageOverlayViewProvid
     var onCreateNoteRequest: (@MainActor (PDFPagePoint) -> Void)?
     var onCreateInsertTextRequest: (@MainActor (PDFPagePoint) -> Void)?
     var onUpdateAnnotation: (@MainActor (Annotation, String, Annotation.Color) async -> Bool)?
+    var onUpdateStatus: (@MainActor (Annotation, Annotation.Status) async -> Bool)?
     var onMoveAnnotationRequest: (@MainActor (Annotation, CGRect) -> Void)?
     var onDeleteAnnotation: (@MainActor (Annotation) async -> Bool)?
     var onSelectAnnotationRequest: (@MainActor (UUID) -> Void)?
@@ -516,6 +517,17 @@ final class AnnotationPDFView: PDFView, @preconcurrency PDFPageOverlayViewProvid
         let windowPoint = window.convertPoint(fromScreen: screenPoint)
         let viewPoint = convert(windowPoint, from: nil)
         return annotationTarget(at: viewPoint)?.annotation.id == annotationID
+    }
+
+    /// ID of the comment-bearing annotation under a screen point, if any.
+    /// Hovering such an annotation will present (or crossfade to) its preview.
+    func commentableAnnotationID(at screenPoint: CGPoint) -> UUID? {
+        guard let window else { return nil }
+        let windowPoint = window.convertPoint(fromScreen: screenPoint)
+        let viewPoint = convert(windowPoint, from: nil)
+        guard let target = annotationTarget(at: viewPoint),
+              target.annotation.hasCommentText else { return nil }
+        return target.annotation.id
     }
 
     /// Acrobat's Insert Text caret snaps to the baseline of the line under the

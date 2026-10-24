@@ -3,10 +3,31 @@ import UniformTypeIdentifiers
 
 @MainActor
 final class ReaderChromeState: ObservableObject {
-    @Published var thumbnailSidebarIsPresented = true
-    @Published var inspectorIsPresented = true
+    @Published var thumbnailSidebarIsPresented: Bool {
+        didSet { defaults.set(thumbnailSidebarIsPresented, forKey: Keys.sidebarVisible) }
+    }
+    @Published var inspectorIsPresented: Bool {
+        didSet { defaults.set(inspectorIsPresented, forKey: Keys.inspectorVisible) }
+    }
     @Published var searchIsPresented = false
     @Published var titleBarHeight: CGFloat = 52
+
+    private let defaults: UserDefaults
+
+    private enum Keys {
+        static let sidebarVisible = "readerSidebarVisible"
+        static let inspectorVisible = "readerInspectorVisible"
+    }
+
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        defaults.register(defaults: [
+            Keys.sidebarVisible: true,
+            Keys.inspectorVisible: true,
+        ])
+        thumbnailSidebarIsPresented = defaults.bool(forKey: Keys.sidebarVisible)
+        inspectorIsPresented = defaults.bool(forKey: Keys.inspectorVisible)
+    }
 }
 
 /// Native macOS document layout: a source sidebar, PDF workspace, and inspector.
@@ -144,6 +165,10 @@ struct ContentView: View {
                         color: color
                     )
                 },
+                onUpdateStatus: { annotation, status in
+                    await documentManager.updateStatus(of: annotation, to: status)
+                    return true
+                },
                 onMoveAnnotationRequest: { annotation, rect in
                     Task { await documentManager.move(annotation, to: rect) }
                 },
@@ -153,7 +178,7 @@ struct ContentView: View {
                 selectedPageIndex: $documentManager.selectedPageIndex
             )
             .background(Color(nsColor: .windowBackgroundColor))
-            .safeAreaInset(edge: .top, spacing: 0) {
+            .safeAreaInset(edge: .bottom, spacing: 0) {
                 if chromeState.searchIsPresented {
                     searchBar
                 }
@@ -211,7 +236,7 @@ struct ContentView: View {
         .padding(.horizontal, 10)
         .padding(.vertical, 6)
         .background(.bar)
-        .overlay(alignment: .bottom) {
+        .overlay(alignment: .top) {
             Divider()
         }
     }
@@ -235,7 +260,7 @@ private extension AnnotationTool {
         case .highlight: "highlighter"
         case .underline: "underline"
         case .strikeout: "strikethrough"
-        case .note: "sticky-note"
+        case .note: "message-square-text"
         case .insertText: "text-cursor-input"
         }
     }

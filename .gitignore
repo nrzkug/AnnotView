@@ -11,6 +11,7 @@ xcuserdata/
 # Generated artifacts
 /AppBundle/AnnotView.icns
 /dist/
+/dist-dev/
 /output/
 /tmp/
 

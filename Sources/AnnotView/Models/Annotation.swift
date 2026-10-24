@@ -70,6 +70,18 @@ struct Annotation: Identifiable, Hashable, Sendable {
             case .unmarked: "flag"
             }
         }
+
+        /// Lucide asset names, matching the toolbar icon catalog.
+        var iconName: String {
+            switch self {
+            case .none: "circle"
+            case .accepted: "circle-check"
+            case .rejected: "circle-x"
+            case .cancelled: "circle-slash"
+            case .completed: "circle-check-big"
+            case .marked, .unmarked: "flag"
+            }
+        }
     }
 
     struct Color: Hashable, Sendable {

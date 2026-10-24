@@ -43,6 +43,11 @@ struct ReaderContentSplitView<Sidebar: View, Main: View, Inspector: View, Tools:
     }
 }
 
+private enum SplitViewDefaultsKey {
+    static let sidebarWidth = "readerSidebarWidth"
+    static let inspectorWidth = "readerInspectorWidth"
+}
+
 private final class ReaderChromeHostingView<Content: View>: NSHostingView<Content> {
     override var mouseDownCanMoveWindow: Bool { false }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
@@ -198,9 +203,15 @@ final class ReaderSplitViewController<Sidebar: View, Main: View, Inspector: View
             didSetInitialWidths = true
             DispatchQueue.main.async { [weak self] in
                 guard let self, self.splitView.bounds.width > 0 else { return }
-                self.splitView.setPosition(260, ofDividerAt: 0)
+                let totalWidth = self.splitView.bounds.width
+                let defaults = UserDefaults.standard
+                if !self.sidebarItem.isCollapsed {
+                    let sidebarWidth = defaults.object(forKey: SplitViewDefaultsKey.sidebarWidth) as? CGFloat ?? 260
+                    self.splitView.setPosition(min(sidebarWidth, totalWidth * 0.5), ofDividerAt: 0)
+                }
                 if !self.inspectorItem.isCollapsed {
-                    self.splitView.setPosition(self.splitView.bounds.width - 360, ofDividerAt: 1)
+                    let inspectorWidth = defaults.object(forKey: SplitViewDefaultsKey.inspectorWidth) as? CGFloat ?? 360
+                    self.splitView.setPosition(max(totalWidth - inspectorWidth, totalWidth * 0.5), ofDividerAt: 1)
                 }
             }
         }
@@ -220,6 +231,18 @@ final class ReaderSplitViewController<Sidebar: View, Main: View, Inspector: View
               reportedChromeHeight != height else { return }
         reportedChromeHeight = height
         DispatchQueue.main.async { [weak self] in self?.onChromeHeightChange(height) }
+    }
+
+    override func splitViewDidResizeSubviews(_ notification: Notification) {
+        // Skip collapsed panes so their pre-collapse widths stay intact.
+        guard view.window != nil, splitView.subviews.count == 3 else { return }
+        let defaults = UserDefaults.standard
+        if !sidebarItem.isCollapsed {
+            defaults.set(Double(splitView.subviews[0].frame.width), forKey: SplitViewDefaultsKey.sidebarWidth)
+        }
+        if !inspectorItem.isCollapsed {
+            defaults.set(Double(splitView.subviews[2].frame.width), forKey: SplitViewDefaultsKey.inspectorWidth)
+        }
     }
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {

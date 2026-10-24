@@ -21,6 +21,7 @@ struct PDFKitPageView: NSViewRepresentable {
     let onCreateNoteRequest: @MainActor (PDFPagePoint) -> Void
     let onCreateInsertTextRequest: @MainActor (PDFPagePoint) -> Void
     let onUpdateAnnotation: @MainActor (Annotation, String, Annotation.Color) async -> Bool
+    let onUpdateStatus: @MainActor (Annotation, Annotation.Status) async -> Bool
     let onMoveAnnotationRequest: @MainActor (Annotation, CGRect) -> Void
     let onDeleteAnnotation: @MainActor (Annotation) async -> Bool
     @Binding var selectedPageIndex: Int
@@ -129,6 +130,7 @@ struct PDFKitPageView: NSViewRepresentable {
         view.onCreateNoteRequest = onCreateNoteRequest
         view.onCreateInsertTextRequest = onCreateInsertTextRequest
         view.onUpdateAnnotation = onUpdateAnnotation
+        view.onUpdateStatus = onUpdateStatus
         view.onMoveAnnotationRequest = onMoveAnnotationRequest
         view.onDeleteAnnotation = onDeleteAnnotation
     }
