@@ -74,7 +74,11 @@ final class AnnotationPDFView: PDFView, @preconcurrency PDFPageOverlayViewProvid
     private var mouseTrackingArea: NSTrackingArea?
     private weak var observedClipView: NSClipView?
     private var scrollObserver: NSObjectProtocol?
-    private var dragState: (annotation: Annotation, page: PDFPage, startViewPoint: CGPoint, startBounds: CGRect)?
+    private var dragState: (annotation: Annotation, page: PDFPage, startViewPoint: CGPoint, startBounds: CGRect, didMove: Bool)?
+    /// Click/drag discrimination in view-space points. Measuring in page
+    /// coordinates would shrink the threshold as the document zooms out and
+    /// swallow ordinary clicks as annotation moves.
+    private static let annotationDragThreshold: CGFloat = 4
     private let pageOverlayViews = NSHashTable<AnnotationPageOverlayView>.weakObjects()
 
     override init(frame frameRect: NSRect) {
@@ -251,20 +255,21 @@ final class AnnotationPDFView: PDFView, @preconcurrency PDFPageOverlayViewProvid
             suppressesMarkupOnMouseUp = true
             onSelectAnnotationRequest?(target.annotation.id)
             interactionController.cancelPendingHoverPresentation()
-            if target.annotation.kind == .note || target.annotation.kind == .caret {
-                // Position-based annotations: wait for mouseUp to tell a click
-                // from a drag, then pin the preview or move the annotation.
+            if target.annotation.kind == .note {
+                // Notes stay movable: pin the preview on press, and only if
+                // the gesture crosses the drag threshold does mouseDragged
+                // dismiss it and move the note instead.
                 dragState = (
                     annotation: target.annotation,
                     page: target.page,
                     startViewPoint: viewPoint,
-                    startBounds: target.annotation.bounds
+                    startBounds: target.annotation.bounds,
+                    didMove: false
                 )
-                return
             }
-            // Markup kinds pin the preview on press. The hover preview is
-            // semitransient, so it is still open here and gets upgraded in
-            // place rather than racing a closing popover.
+            // Markup kinds, carets, and notes pin the preview on press. The
+            // hover preview is semitransient, so it is still open here and
+            // gets upgraded in place rather than racing a closing popover.
             handleAnnotationPresentation(target.annotation, on: target.page, request: .documentClick)
             return
         }
@@ -293,27 +298,30 @@ final class AnnotationPDFView: PDFView, @preconcurrency PDFPageOverlayViewProvid
     }
 
     override func mouseDragged(with event: NSEvent) {
-        if dragState != nil {
-            // Dragging has begun: drop the pinned preview and move the note.
-            popoverCoordinator.dismiss()
-            updateDrag(to: convert(event.locationInWindow, from: nil))
-        } else {
+        guard var drag = dragState else {
             super.mouseDragged(with: event)
+            return
         }
+        let viewPoint = convert(event.locationInWindow, from: nil)
+        if !drag.didMove {
+            guard hypot(
+                viewPoint.x - drag.startViewPoint.x,
+                viewPoint.y - drag.startViewPoint.y
+            ) >= Self.annotationDragThreshold else { return }
+            drag.didMove = true
+            dragState = drag
+            // Dragging has begun: drop the pinned preview and move the annotation.
+            popoverCoordinator.dismiss()
+        }
+        updateDrag(to: viewPoint)
     }
 
     override func mouseUp(with event: NSEvent) {
         if let drag = dragState {
             dragState = nil
-            let viewPoint = convert(event.locationInWindow, from: nil)
-            let pagePoint = convert(viewPoint, to: drag.page)
-            let startPagePoint = convert(drag.startViewPoint, to: drag.page)
-            let moved = hypot(pagePoint.x - startPagePoint.x, pagePoint.y - startPagePoint.y)
-            if moved < 3 {
-                // A click: pin the (still-open, semitransient) hover preview.
-                handleAnnotationPresentation(drag.annotation, on: drag.page, request: .documentClick)
-            } else if let onMoveAnnotationRequest {
-                popoverCoordinator.dismiss()
+            // The preview was already pinned on mouseDown; mouseUp only
+            // commits a real drag as a move.
+            if drag.didMove, let onMoveAnnotationRequest {
                 onMoveAnnotationRequest(drag.annotation, drag.annotation.bounds)
             }
             return
@@ -339,7 +347,7 @@ final class AnnotationPDFView: PDFView, @preconcurrency PDFPageOverlayViewProvid
             pageAnnotations[index] = updated
             overlayAnnotations[updated.pageIndex] = pageAnnotations
         }
-        dragState = (annotation: updated, page: drag.page, startViewPoint: drag.startViewPoint, startBounds: drag.startBounds)
+        dragState = (annotation: updated, page: drag.page, startViewPoint: drag.startViewPoint, startBounds: drag.startBounds, didMove: drag.didMove)
     }
 
     override func menu(for event: NSEvent) -> NSMenu? {
@@ -604,12 +612,26 @@ final class AnnotationPDFView: PDFView, @preconcurrency PDFPageOverlayViewProvid
         return true
     }
 
+    // Selection commands never arm a persistent tool. Choosing a tool remains
+    // a separate menu/toolbar action, even when there is no selected text.
+    @objc func applyHighlightToSelection(_ sender: Any?) {
+        createMarkupFromActiveSelection(kind: .highlight)
+    }
+
+    @objc func applyUnderlineToSelection(_ sender: Any?) {
+        createMarkupFromActiveSelection(kind: .underline)
+    }
+
+    @objc func applyStrikethroughToSelection(_ sender: Any?) {
+        createMarkupFromActiveSelection(kind: .strikeout)
+    }
+
     @objc func highlightSelection(_ sender: Any?) {
         if !createMarkupFromActiveSelection(kind: .highlight) {
             annotationTool = .highlight
             NotificationCenter.default.post(
                 name: .annotViewToolDidChange,
-                object: nil,
+                object: self,
                 userInfo: ["tool": AnnotationTool.highlight]
             )
         }
@@ -620,7 +642,7 @@ final class AnnotationPDFView: PDFView, @preconcurrency PDFPageOverlayViewProvid
             annotationTool = .underline
             NotificationCenter.default.post(
                 name: .annotViewToolDidChange,
-                object: nil,
+                object: self,
                 userInfo: ["tool": AnnotationTool.underline]
             )
         }
@@ -631,7 +653,7 @@ final class AnnotationPDFView: PDFView, @preconcurrency PDFPageOverlayViewProvid
             annotationTool = .strikeout
             NotificationCenter.default.post(
                 name: .annotViewToolDidChange,
-                object: nil,
+                object: self,
                 userInfo: ["tool": AnnotationTool.strikeout]
             )
         }
@@ -639,6 +661,10 @@ final class AnnotationPDFView: PDFView, @preconcurrency PDFPageOverlayViewProvid
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         switch menuItem.action {
+        case #selector(applyHighlightToSelection(_:)),
+             #selector(applyUnderlineToSelection(_:)),
+             #selector(applyStrikethroughToSelection(_:)):
+            return markupSelection() != nil
         case #selector(highlightSelection(_:)),
              #selector(underlineSelection(_:)),
              #selector(strikeoutSelection(_:)):

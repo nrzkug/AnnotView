@@ -31,6 +31,7 @@ final class AnnotationPopoverCoordinator: NSObject, NSPopoverDelegate {
     /// until this one has fully closed, otherwise the new show cancels the fade.
     private var fadingPopover: NSPopover?
     private var hoverDismissTask: Task<Void, Never>?
+    private var popoverMouseDownMonitor: Any?
     private var positionedAnnotation: Annotation?
     private weak var positionedPage: PDFPage?
 
@@ -363,8 +364,27 @@ final class AnnotationPopoverCoordinator: NSObject, NSPopoverDelegate {
         activePopover = state
         positionedAnnotation = annotation
         positionedPage = page
+        monitorClicksInsidePopover()
         if case .preview(pinned: false) = state.kind {
             monitorHoverPreview(for: state.annotationID)
+        }
+    }
+
+    /// Pressing anywhere inside the card pins a hover preview. Without this a
+    /// drag that leaves the card edge — selecting text, reaching a scroll
+    /// position — counts as "mouse left the hover region" and the preview is
+    /// dismissed mid-gesture.
+    private func monitorClicksInsidePopover() {
+        guard popoverMouseDownMonitor == nil else { return }
+        popoverMouseDownMonitor = NSEvent.addLocalMonitorForEvents(
+            matching: .leftMouseDown
+        ) { [weak self] event in
+            guard let self,
+                  event.window === self.popover?.contentViewController?.view.window else {
+                return event
+            }
+            self.pinCurrentPreview()
+            return event
         }
     }
 
@@ -401,6 +421,10 @@ final class AnnotationPopoverCoordinator: NSObject, NSPopoverDelegate {
     private func closeCurrentPopover(animated: Bool = true) {
         hoverDismissTask?.cancel()
         hostView?.cancelPendingHoverPresentation()
+        if let monitor = popoverMouseDownMonitor {
+            NSEvent.removeMonitor(monitor)
+            popoverMouseDownMonitor = nil
+        }
 
         let closingPopover = popover
         var closingPreview = false

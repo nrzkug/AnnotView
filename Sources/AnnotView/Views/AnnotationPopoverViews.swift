@@ -59,12 +59,13 @@ struct AnnotationPopoverView: View {
     @State private var status: Annotation.Status
     @State private var isEditing = false
     @State private var draft = ""
-    @State private var caretHint: CGPoint?
     @State private var isSaving = false
     @State private var copied = false
     @State private var expanded = false
     @State private var hoveringCopy = false
-    @State private var menuTarget = StatusMenuTarget()
+    @State private var hoveringStatus = false
+    @State private var menuTarget = AnnotationStatusMenuTarget()
+    @State private var statusAnchorView: NSView?
     @Environment(\.colorScheme) private var colorScheme
 
     static let width: CGFloat = 368
@@ -118,7 +119,7 @@ struct AnnotationPopoverView: View {
                     .truncationMode(.tail)
 
                 Text(dateText)
-                    .font(.system(size: 10.4))
+                    .font(.system(size: 11))
                     .monospacedDigit()
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
@@ -163,7 +164,7 @@ struct AnnotationPopoverView: View {
                     .stroke(annotationInk.opacity(0.30), lineWidth: 1)
             }
             .overlay {
-                Image(annotation.popupIconName, bundle: .module)
+                Image(annotation.kind.iconName, bundle: .module)
                     .resizable()
                     .scaledToFit()
                     .foregroundStyle(annotationInk)
@@ -194,31 +195,35 @@ struct AnnotationPopoverView: View {
             HStack(spacing: 4) {
                 icon(status.iconName, size: 11)
                 Text(status.displayName)
-                    .font(.system(size: 10.8, weight: .semibold))
+                    .font(.system(size: 11, weight: .medium))
                 icon("chevron-down", size: 9)
                     .opacity(0.68)
             }
             .foregroundStyle(statusTint)
             .padding(.horizontal, 7)
             .frame(height: 24)
-            .background(statusTint.opacity(0.11))
+            .background(statusTint.opacity(hoveringStatus ? 0.17 : 0.11))
             .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
             .overlay {
                 RoundedRectangle(cornerRadius: 7, style: .continuous)
-                    .stroke(statusTint.opacity(0.26), lineWidth: 1)
+                    .stroke(statusTint.opacity(hoveringStatus ? 0.36 : 0.26), lineWidth: 1)
             }
             .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+            .background(MenuAnchorView(view: $statusAnchorView))
         }
         .buttonStyle(.plain)
         .fixedSize()
-        .help("Change status")
+        .onHover { hoveringStatus = $0 }
+        .help("\(status.displayName): \(status.help)")
     }
 
     private func showStatusMenu() {
-        guard let window = NSApp.keyWindow ?? NSApp.mainWindow,
-              let contentView = window.contentView else { return }
+        guard let anchor = statusAnchorView,
+              let window = anchor.window else { return }
+        let rectOnScreen = window.convertToScreen(anchor.convert(anchor.bounds, to: nil))
+
         menuTarget.onSelect = { next in
-            applyStatus(next)
+            if let next { applyStatus(next) }
         }
         // A semitransient popover closes when a menu item is clicked (the menu
         // is another window); switch to app-defined behaviour while tracking so
@@ -226,26 +231,16 @@ struct AnnotationPopoverView: View {
         onStatusMenuTracking(true)
         defer { onStatusMenuTracking(false) }
 
-        let menu = NSMenu()
-        menu.autoenablesItems = false
-        for item in Annotation.Status.selectableCases {
-            let menuItem = NSMenuItem(
-                title: item.displayName,
-                action: #selector(StatusMenuTarget.select(_:)),
-                keyEquivalent: ""
-            )
-            menuItem.target = menuTarget
-            menuItem.representedObject = item.rawValue
-            menuItem.state = item == status ? .on : .off
-            if let image = Bundle.module.image(forResource: item.iconName) {
-                image.size = NSSize(width: 13, height: 13)
-                menuItem.image = image
-            }
-            menu.addItem(menuItem)
-        }
-
-        let location = contentView.convert(window.convertPoint(fromScreen: NSEvent.mouseLocation), from: nil)
-        menu.popUp(positioning: nil, at: location, in: contentView)
+        let menu = AnnotationStatusMenu.make(
+            selection: status,
+            includeAll: false,
+            target: menuTarget
+        )
+        menu.popUp(
+            positioning: nil,
+            at: NSPoint(x: max(rectOnScreen.maxX - menu.size.width, 8), y: rectOnScreen.minY - 6),
+            in: nil
+        )
     }
 
     private func icon(_ name: String, size: CGFloat) -> some View {
@@ -297,16 +292,9 @@ struct AnnotationPopoverView: View {
             .font(.system(size: Self.textFontSize))
             .foregroundStyle(.primary)
             .lineSpacing(Self.textLineSpacing)
+            .textSelection(.enabled)
             .fixedSize(horizontal: false, vertical: true)
-            .modifier(IBeamOnHover())
             .frame(maxWidth: .infinity, alignment: .leading)
-            .contentShape(Rectangle())
-            .gesture(
-                SpatialTapGesture(count: 2).onEnded { value in
-                    beginEditing(at: value.location)
-                }
-            )
-            .help("Double-click to edit")
     }
 
     private var editorSection: some View {
@@ -315,7 +303,6 @@ struct AnnotationPopoverView: View {
             font: .systemFont(ofSize: Self.textFontSize),
             textColor: .labelColor,
             lineSpacing: Self.textLineSpacing,
-            caretHint: caretHint,
             onCancel: { cancelEditing() },
             onSubmit: { commitEditing() }
         )
@@ -369,10 +356,9 @@ struct AnnotationPopoverView: View {
         Self.measuredTextHeight(displayText) > fiveLineHeight + 0.5
     }
 
-    private func beginEditing(at point: CGPoint? = nil) {
+    private func beginEditing() {
         guard !isEditing else { return }
         draft = commentText
-        caretHint = point
         isEditing = true
     }
 
@@ -441,41 +427,6 @@ struct AnnotationPopoverView: View {
             options: [.usesLineFragmentOrigin, .usesFontLeading],
             attributes: attributes
         ).height
-    }
-}
-
-@MainActor
-private final class StatusMenuTarget: NSObject {
-    var onSelect: ((Annotation.Status) -> Void)?
-
-    @objc func select(_ sender: NSMenuItem) {
-        guard let raw = sender.representedObject as? String,
-              let status = Annotation.Status(rawValue: raw) else { return }
-        onSelect?(status)
-    }
-}
-
-/// Shows the I-beam over preview text, so the double-click affordance is visible.
-private struct IBeamOnHover: ViewModifier {
-    @State private var isPushed = false
-
-    func body(content: Content) -> some View {
-        content
-            .onHover { hovering in
-                if hovering, !isPushed {
-                    NSCursor.iBeam.push()
-                    isPushed = true
-                } else if !hovering, isPushed {
-                    NSCursor.pop()
-                    isPushed = false
-                }
-            }
-            .onDisappear {
-                if isPushed {
-                    NSCursor.pop()
-                    isPushed = false
-                }
-            }
     }
 }
 
@@ -551,12 +502,12 @@ struct AnnotationEditorView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 8) {
-                Image(annotation.popupIconName, bundle: .module)
+                Image(annotation.kind.iconName, bundle: .module)
                     .resizable()
                     .scaledToFit()
                     .frame(width: 15, height: 15)
                     .foregroundStyle(color)
-                Text("Edit \(annotation.popupKindName)")
+                Text("Edit \(annotation.kind.displayName)")
                     .font(.headline)
                 Spacer()
                 ColorPicker("Color", selection: $color, supportsOpacity: false)
@@ -638,8 +589,6 @@ private final class InlineCommentTextView: NSTextView {
     var onSubmit: (() -> Void)?
     private var didFocus = false
 
-    var caretHint: CGPoint?
-
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         guard window != nil, !didFocus else { return }
@@ -647,26 +596,8 @@ private final class InlineCommentTextView: NSTextView {
         DispatchQueue.main.async { [weak self] in
             guard let self, let window = self.window else { return }
             window.makeFirstResponder(self)
-            self.setSelectedRange(NSRange(location: self.caretIndex(), length: 0))
+            self.setSelectedRange(NSRange(location: self.string.count, length: 0))
         }
-    }
-
-    /// Resolve the click position against the editor's own layout so the caret
-    /// lands on the character the user double-clicked, not at the text end.
-    private func caretIndex() -> Int {
-        let length = (string as NSString).length
-        guard let caretHint,
-              let layoutManager,
-              let textContainer else { return length }
-        layoutManager.ensureLayout(for: textContainer)
-        let origin = textContainerOrigin
-        let point = NSPoint(x: caretHint.x - origin.x, y: caretHint.y - origin.y)
-        let index = layoutManager.characterIndex(
-            for: point,
-            in: textContainer,
-            fractionOfDistanceBetweenInsertionPoints: nil
-        )
-        return min(max(index, 0), length)
     }
 
     override func cancelOperation(_ sender: Any?) {
@@ -694,7 +625,6 @@ private struct InlineCommentEditor: NSViewRepresentable {
     let font: NSFont
     let textColor: NSColor
     let lineSpacing: CGFloat
-    let caretHint: CGPoint?
     let onCancel: () -> Void
     let onSubmit: () -> Void
 
@@ -730,7 +660,6 @@ private struct InlineCommentEditor: NSViewRepresentable {
             width: AnnotationPopoverView.width - 28,
             height: CGFloat.greatestFiniteMagnitude
         )
-        textView.caretHint = caretHint
         textView.onCancel = onCancel
         textView.onSubmit = onSubmit
 
@@ -752,7 +681,6 @@ private struct InlineCommentEditor: NSViewRepresentable {
     func updateNSView(_ scroll: NSScrollView, context: Context) {
         guard let textView = scroll.documentView as? InlineCommentTextView else { return }
         context.coordinator.parent = self
-        textView.caretHint = caretHint
         textView.onCancel = onCancel
         textView.onSubmit = onSubmit
         if textView.string != text {
@@ -782,28 +710,4 @@ private struct InlineCommentEditor: NSViewRepresentable {
 
 private extension String {
     var nilIfEmpty: String? { isEmpty ? nil : self }
-}
-
-private extension Annotation {
-    var popupKindName: String {
-        switch kind {
-        case .highlight: "Highlight"
-        case .underline: "Underline"
-        case .strikeout: "Strikeout"
-        case .note: "Note"
-        case .ink: "Ink"
-        case .caret: "Insertion"
-        }
-    }
-
-    var popupIconName: String {
-        switch kind {
-        case .highlight: "highlighter"
-        case .underline: "underline"
-        case .strikeout: "strikethrough"
-        case .note: "message-square-text"
-        case .ink: "pencil"
-        case .caret: "text-cursor-input"
-        }
-    }
 }

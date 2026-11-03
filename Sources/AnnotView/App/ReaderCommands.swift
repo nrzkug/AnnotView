@@ -68,23 +68,33 @@ struct ReaderCommands: Commands {
         }
 
         CommandMenu("Annotate") {
-            Button("Highlight") {
-                NSApp.sendAction(#selector(AnnotationPDFView.highlightSelection(_:)), to: nil, from: nil)
+            Picker("Tool", selection: $chromeState.annotationTool) {
+                ForEach(AnnotationTool.allCases, id: \.self) { tool in
+                    Text(tool.label).tag(tool)
+                }
+            }
+            .pickerStyle(.inline)
+            .disabled(documentManager.document == nil)
+
+            Divider()
+
+            Button("Highlight Selected Text") {
+                NSApp.sendAction(#selector(AnnotationPDFView.applyHighlightToSelection(_:)), to: nil, from: nil)
             }
             .keyboardShortcut("h", modifiers: [.control, .command])
-            .disabled(documentManager.document == nil)
+            .disabled(!canApplyMarkup)
 
-            Button("Underline") {
-                NSApp.sendAction(#selector(AnnotationPDFView.underlineSelection(_:)), to: nil, from: nil)
+            Button("Underline Selected Text") {
+                NSApp.sendAction(#selector(AnnotationPDFView.applyUnderlineToSelection(_:)), to: nil, from: nil)
             }
             .keyboardShortcut("u", modifiers: [.control, .command])
-            .disabled(documentManager.document == nil)
+            .disabled(!canApplyMarkup)
 
-            Button("Strikethrough") {
-                NSApp.sendAction(#selector(AnnotationPDFView.strikeoutSelection(_:)), to: nil, from: nil)
+            Button("Strikethrough Selected Text") {
+                NSApp.sendAction(#selector(AnnotationPDFView.applyStrikethroughToSelection(_:)), to: nil, from: nil)
             }
-            .keyboardShortcut("s", modifiers: [.control, .command])
-            .disabled(documentManager.document == nil)
+            .keyboardShortcut("x", modifiers: [.control, .command])
+            .disabled(!canApplyMarkup)
         }
 
         CommandGroup(after: .help) {
@@ -96,5 +106,9 @@ struct ReaderCommands: Commands {
                 )
             }
         }
+    }
+
+    private var canApplyMarkup: Bool {
+        documentManager.document != nil && chromeState.hasMarkupSelection && !documentManager.isSavingAnnotation
     }
 }

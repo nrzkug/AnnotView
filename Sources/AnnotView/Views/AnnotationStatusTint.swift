@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 extension Annotation.Status {
@@ -11,5 +12,16 @@ extension Annotation.Status {
         case .marked: .purple
         }
     }
-}
 
+    /// AppKit counterpart used by the native status menus.
+    var nsTint: NSColor {
+        switch self {
+        case .none, .unmarked: .secondaryLabelColor
+        case .accepted: .systemGreen
+        case .rejected: .systemRed
+        case .cancelled: .systemOrange
+        case .completed: .systemBlue
+        case .marked: .systemPurple
+        }
+    }
+}

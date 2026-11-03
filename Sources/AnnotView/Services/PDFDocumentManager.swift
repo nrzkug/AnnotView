@@ -757,17 +757,39 @@ final class PDFDocumentManager: ObservableObject {
         let primarySourceID = annotations.first(where: { $0.id == selectedAnnotationID })?.sourceID
         let focusedSourceID = focusedAnnotation?.sourceID
 
-        annotations = replacements
-        selectedAnnotationIDs = Set(replacements.lazy
+        // Re-parsing mints a fresh id for every annotation; carry each
+        // refreshed annotation's predecessor id over by sourceID. Otherwise
+        // every id-keyed interaction — the open popover, hover state, the
+        // selection — reads the refreshed annotation as a different one, and
+        // the popover coordinator dismisses a preview that is still valid
+        // (e.g. right after a comment save).
+        var remapped = replacements
+        var preservedIDs: [String: UUID] = [:]
+        for annotation in annotations {
+            if let sourceID = annotation.sourceID {
+                preservedIDs[sourceID] = annotation.id
+            }
+        }
+        for index in remapped.indices {
+            guard let sourceID = remapped[index].sourceID,
+                  let preservedID = preservedIDs[sourceID] else { continue }
+            remapped[index].id = preservedID
+        }
+        for index in remapped.indices {
+            remapped[index].markedText = markedText(for: remapped[index])
+        }
+
+        annotations = remapped
+        selectedAnnotationIDs = Set(remapped.lazy
             .filter { annotation in
                 annotation.sourceID.map(selectedSourceIDs.contains) == true
             }
             .map(\.id))
         selectedAnnotationID = primarySourceID.flatMap { sourceID in
-            replacements.first(where: { $0.sourceID == sourceID })?.id
-        } ?? replacements.first(where: { selectedAnnotationIDs.contains($0.id) })?.id
+            remapped.first(where: { $0.sourceID == sourceID })?.id
+        } ?? remapped.first(where: { selectedAnnotationIDs.contains($0.id) })?.id
         if let focusedSourceID {
-            focusedAnnotation = replacements.first(where: { $0.sourceID == focusedSourceID })
+            focusedAnnotation = remapped.first(where: { $0.sourceID == focusedSourceID })
         }
         invalidateThumbnailCache()
     }
@@ -783,6 +805,33 @@ final class PDFDocumentManager: ObservableObject {
         canRedoAnnotationChange = !annotationRedoHistory.isEmpty
         undoAnnotationTitle = annotationUndoHistory.last.map { "Undo \($0.actionName)" } ?? "Undo"
         redoAnnotationTitle = annotationRedoHistory.last.map { "Redo \($0.actionName)" } ?? "Redo"
+    }
+
+    /// Extracts the page text covered by the annotation's quads so the
+    /// sidebar can show which passage a comment refers to.
+    private func markedText(for annotation: Annotation) -> String? {
+        let points = annotation.quadPoints
+        guard points.count >= 4,
+              let page = document?.page(at: annotation.pageIndex) else { return nil }
+        var parts: [String] = []
+        for index in stride(from: 0, through: points.count - 4, by: 4) {
+            let quad = points[index...index + 3]
+            let xs = quad.map(\.x)
+            let ys = quad.map(\.y)
+            let rect = CGRect(
+                x: xs.min() ?? 0,
+                y: ys.min() ?? 0,
+                width: (xs.max() ?? 0) - (xs.min() ?? 0),
+                height: (ys.max() ?? 0) - (ys.min() ?? 0)
+            )
+            guard let text = page.selection(for: rect)?.string else { continue }
+            parts.append(text)
+        }
+        let joined = parts.joined(separator: " ")
+            .components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+        return joined.isEmpty ? nil : joined
     }
 
     private func markupSelection(from annotation: Annotation) -> PDFMarkupSelection? {

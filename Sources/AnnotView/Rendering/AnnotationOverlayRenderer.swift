@@ -209,7 +209,10 @@ enum AnnotationOverlayRenderer {
             return noteIconRect(for: annotation).insetBy(dx: -3, dy: -3).contains(point)
         }
         if annotation.kind == .caret {
-            return caretMarkerRect(for: annotation).insetBy(dx: -3, dy: -3).contains(point)
+            return caretMarkerRect(for: annotation)
+                .union(annotation.bounds)
+                .insetBy(dx: -4, dy: -4)
+                .contains(point)
         }
         return quadrilaterals(from: annotation).contains { quad in
             path(for: quad).boundingBox.insetBy(dx: -2, dy: -2).contains(point)

@@ -4,6 +4,46 @@ import Testing
 @testable import AnnotView
 
 struct AnnotationCreationTests {
+    @Test @MainActor
+    func selectedTextCommandsApplyMarkupWithoutChangingTheTool() throws {
+        let sampleURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("docs/samples/annotview-review-demo.pdf")
+        let document = try #require(PDFDocument(url: sampleURL))
+        let view = AnnotationPDFView(frame: NSRect(x: 0, y: 0, width: 800, height: 600))
+        view.document = document
+
+        var receivedKinds: [Annotation.Kind] = []
+        view.onCreateMarkupRequest = { kind, selection in
+            receivedKinds.append(kind)
+            #expect(selection.selectedText.contains("Keep feedback"))
+        }
+
+        let actions: [(Selector, Annotation.Kind)] = [
+            (#selector(AnnotationPDFView.applyHighlightToSelection(_:)), .highlight),
+            (#selector(AnnotationPDFView.applyUnderlineToSelection(_:)), .underline),
+            (#selector(AnnotationPDFView.applyStrikethroughToSelection(_:)), .strikeout),
+        ]
+        for (action, kind) in actions {
+            let item = NSMenuItem(title: "Apply", action: action, keyEquivalent: "")
+            #expect(!view.validateMenuItem(item))
+            view.perform(action, with: nil)
+            #expect(view.annotationTool == .selection)
+            #expect(receivedKinds.isEmpty)
+
+            let selection = try #require(document.findString("Keep feedback", withOptions: []).first)
+            view.setCurrentSelection(selection, animate: false)
+            #expect(view.validateMenuItem(item))
+            view.perform(action, with: nil)
+            #expect(receivedKinds == [kind])
+            #expect(view.currentSelection == nil)
+            #expect(view.annotationTool == .selection)
+            receivedKinds.removeAll()
+        }
+    }
+
     @Test func editingColorPreservesAnnotationOpacity() {
         let original = Annotation.Color.yellow
         let edited = original.replacingRGB(red: 0.2, green: 0.4, blue: 0.6)

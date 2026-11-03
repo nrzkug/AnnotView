@@ -25,9 +25,13 @@ struct ThumbnailSidebar: View {
             }
             .pickerStyle(.segmented)
             .labelsHidden()
-            // Keep both segments in place. Removing Outline when a document has
-            // none makes the remaining Pages segment expand into the centre.
-            .padding(10)
+            .controlSize(.small)
+            // Keep the intrinsic-width control centered as the sidebar resizes.
+            .fixedSize(horizontal: true, vertical: false)
+            .frame(maxWidth: .infinity)
+            // Keep both segments in place when the document has no outline.
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
 
             .onChange(of: hasOutline) { _, hasOutline in
                 if !hasOutline {

@@ -1,4 +1,5 @@
 import SwiftUI
+import PDFKit
 import UniformTypeIdentifiers
 
 @MainActor
@@ -10,6 +11,8 @@ final class ReaderChromeState: ObservableObject {
         didSet { defaults.set(inspectorIsPresented, forKey: Keys.inspectorVisible) }
     }
     @Published var searchIsPresented = false
+    @Published var annotationTool: AnnotationTool = .selection
+    @Published var hasMarkupSelection = false
     @Published var titleBarHeight: CGFloat = 52
 
     private let defaults: UserDefaults
@@ -36,7 +39,6 @@ struct ContentView: View {
     @EnvironmentObject private var chromeState: ReaderChromeState
     @EnvironmentObject private var searchController: PDFSearchController
     @State private var annotationStatusFilter: Annotation.Status?
-    @State private var annotationTool: AnnotationTool = .selection
     @FocusState private var searchFieldIsFocused: Bool
 
     var body: some View {
@@ -46,7 +48,7 @@ struct ContentView: View {
             chromeHeight: $chromeState.titleBarHeight
         ) {
             ThumbnailSidebar()
-                .padding(.top, chromeState.titleBarHeight)
+                .padding(.top, chromeState.titleBarHeight + 12)
                 .scrollContentBackground(.hidden)
         } main: {
             reader
@@ -55,7 +57,7 @@ struct ContentView: View {
         } inspector: {
             AnnotationSidebar(statusFilter: $annotationStatusFilter)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .padding(.top, chromeState.titleBarHeight)
+                .padding(.top, chromeState.titleBarHeight + 12)
         } tools: {
             annotationToolControl
         }
@@ -84,9 +86,23 @@ struct ContentView: View {
             Text(documentManager.errorMessage ?? "Unknown error")
         }
         .onReceive(NotificationCenter.default.publisher(for: .annotViewToolDidChange)) { notification in
-            if let tool = notification.userInfo?["tool"] as? AnnotationTool {
-                annotationTool = tool
+            if let view = notification.object as? AnnotationPDFView,
+               view.document === documentManager.document,
+               let tool = notification.userInfo?["tool"] as? AnnotationTool {
+                chromeState.annotationTool = tool
             }
+        }
+        .onReceive(
+            NotificationCenter.default.publisher(for: .PDFViewSelectionChanged)
+                .receive(on: RunLoop.main)
+        ) { notification in
+            if let view = notification.object as? AnnotationPDFView,
+               view.document === documentManager.document {
+                chromeState.hasMarkupSelection = view.markupSelection() != nil
+            }
+        }
+        .onChange(of: documentManager.documentURL) {
+            chromeState.hasMarkupSelection = false
         }
     }
 
@@ -111,7 +127,7 @@ struct ContentView: View {
     }
 
     private var annotationToolPicker: some View {
-        Picker("Annotation Tool", selection: $annotationTool) {
+        Picker("Annotation Tool", selection: $chromeState.annotationTool) {
             ForEach(AnnotationTool.allCases, id: \.self) { tool in
                 Label {
                     Text(tool.label)
@@ -122,6 +138,7 @@ struct ContentView: View {
                         .frame(width: 16, height: 16)
                 }
                 .tag(tool)
+                .help(tool.label)
             }
         }
     }
@@ -148,7 +165,7 @@ struct ContentView: View {
                 searchNavigationID: searchController.navigationID,
                 zoomAction: documentManager.zoomAction,
                 zoomRequestID: documentManager.zoomRequestID,
-                annotationTool: annotationTool,
+                annotationTool: chromeState.annotationTool,
                 onCreateMarkupRequest: { kind, selection in
                     Task { await documentManager.createMarkup(kind: kind, selection: selection) }
                 },
@@ -173,7 +190,11 @@ struct ContentView: View {
                     Task { await documentManager.move(annotation, to: rect) }
                 },
                 onDeleteAnnotation: { annotation in
-                    await documentManager.deleteAnnotation(annotation)
+                    guard await AnnotationDeleteConfirmation.confirm(
+                        count: 1,
+                        from: NSApp.keyWindow ?? NSApp.mainWindow
+                    ) else { return false }
+                    return await documentManager.deleteAnnotation(annotation)
                 },
                 selectedPageIndex: $documentManager.selectedPageIndex
             )
@@ -242,13 +263,13 @@ struct ContentView: View {
     }
 }
 
-private extension AnnotationTool {
+extension AnnotationTool {
     var label: String {
         switch self {
         case .selection: "Select"
         case .highlight: "Highlight"
         case .underline: "Underline"
-        case .strikeout: "Strikeout"
+        case .strikeout: "Strikethrough"
         case .note: "Sticky Note"
         case .insertText: "Insert Text"
         }
