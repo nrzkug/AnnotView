@@ -37,3 +37,6 @@ __pycache__/
 /.agents/
 /.codex/
 /.impeccable/
+
+# Private sample documents
+/docs/samples/annotview-review-demo.pdf
