@@ -32,3 +32,8 @@ __pycache__/
 
 # Minimal MuPDF source build cache (Scripts/build-mupdf.sh)
 /.mupdf-cache/
+
+# Local agent/tooling state
+/.agents/
+/.codex/
+/.impeccable/
