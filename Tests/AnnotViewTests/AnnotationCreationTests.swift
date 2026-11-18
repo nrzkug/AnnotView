@@ -44,16 +44,6 @@ struct AnnotationCreationTests {
         }
     }
 
-    @Test func editingColorPreservesAnnotationOpacity() {
-        let original = Annotation.Color.yellow
-        let edited = original.replacingRGB(red: 0.2, green: 0.4, blue: 0.6)
-
-        #expect(edited.red == 0.2)
-        #expect(edited.green == 0.4)
-        #expect(edited.blue == 0.6)
-        #expect(edited.alpha == original.alpha)
-    }
-
     @Test @MainActor
     func writesAndReopensAcrobatCompatibleHighlight() async throws {
         let temporaryDirectory = FileManager.default.temporaryDirectory
@@ -293,8 +283,7 @@ struct AnnotationCreationTests {
 
         let saved = await manager.updateAnnotation(
             recreated,
-            contents: "Edited comment",
-            color: .green
+            contents: "Edited comment"
         )
         #expect(saved)
         #expect(manager.annotations.first?.contents == "Edited comment")
@@ -311,6 +300,93 @@ struct AnnotationCreationTests {
         #expect(manager.annotations.count == 1)
         await manager.redoAnnotationChange()
         #expect(manager.annotations.isEmpty)
+    }
+
+    @Test @MainActor
+    func preservesQuotesRotatedCropBoxAndCaretHistoryRemapping() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("AnnotViewAuditFixes-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let documentURL = directory.appendingPathComponent("rotated-crop.pdf")
+        let image = NSImage(size: NSSize(width: 612, height: 792))
+        image.lockFocus()
+        NSColor.white.setFill()
+        NSRect(origin: .zero, size: image.size).fill()
+        image.unlockFocus()
+        let page = try #require(PDFPage(image: image))
+        page.rotation = 270
+        page.setBounds(CGRect(x: 20, y: 30, width: 572, height: 732), for: .cropBox)
+        let document = PDFDocument()
+        document.insert(page, at: 0)
+        #expect(document.write(to: documentURL))
+
+        let manager = PDFDocumentManager()
+        await manager.open(url: documentURL)
+
+        // 1. Caret + Note + Markup coordinates on a rotated, non-zero CropBox page
+        let caretPoint = CGPoint(x: 150, y: 420)
+        let createdCaret = try #require(
+            await manager.createCaret(at: PDFPagePoint(pageIndex: 0, point: caretPoint))
+        )
+        #expect(abs(createdCaret.bounds.midX - caretPoint.x) < 0.05)
+        #expect(abs(createdCaret.bounds.midY - caretPoint.y) < 0.05)
+
+        // 2. Quotes `"` preserved across consecutive edits + delete/undo sourceID remapping
+        #expect(await manager.updateAnnotation(createdCaret, contents: #"Define "alpha" here"#))
+        #expect(manager.annotations.first?.contents == #"Define "alpha" here"#)
+        // Pass the older `createdCaret` snapshot to simulate an open popover's second save
+        #expect(await manager.updateAnnotation(createdCaret, contents: #"Define "beta" here"#))
+        #expect(manager.annotations.first?.contents == #"Define "beta" here"#)
+
+        #expect(await manager.updateStatus(of: createdCaret, to: .accepted))
+        #expect(manager.annotations.first?.status == .accepted)
+        // Reverting back to Pending using the stale initial struct must still persist
+        #expect(await manager.updateStatus(of: createdCaret, to: .none))
+        #expect(manager.annotations.first?.status == Annotation.Status.none)
+        #expect(await manager.updateStatus(of: createdCaret, to: .completed))
+
+        let currentCaret = try #require(manager.annotations.first)
+        #expect(await manager.deleteAnnotation(currentCaret))
+        #expect(manager.annotations.isEmpty)
+
+        // Undo delete restores Caret, its status, and remaps earlier edit history sourceIDs
+        await manager.undoAnnotationChange()
+        let restoredCaret = try #require(manager.annotations.first)
+        #expect(restoredCaret.kind == .caret)
+        #expect(restoredCaret.status == .completed)
+        #expect(restoredCaret.contents == #"Define "beta" here"#)
+
+        // Undo second edit must step back to "alpha" (not skip to "") using remapped sourceID
+        await manager.undoAnnotationChange()
+        #expect(manager.annotations.first?.contents == #"Define "alpha" here"#)
+
+        // Note + Markup round-trip on the same 270°-rotated cropped page
+        let notePoint = CGPoint(x: 240, y: 500)
+        let createdNote = try #require(
+            await manager.createNote(at: PDFPagePoint(pageIndex: 0, point: notePoint))
+        )
+        #expect(abs(createdNote.bounds.midX - notePoint.x) < 0.05)
+        #expect(abs(createdNote.bounds.midY - notePoint.y) < 0.05)
+
+        let quad = PDFMarkupQuad(
+            topLeft: CGPoint(x: 100, y: 312), topRight: CGPoint(x: 220, y: 312),
+            bottomLeft: CGPoint(x: 100, y: 300), bottomRight: CGPoint(x: 220, y: 300)
+        )
+        let createdMarkup = try #require(
+            await manager.createMarkup(
+                kind: .underline,
+                selection: PDFMarkupSelection(
+                    pages: [.init(pageIndex: 0, quads: [quad])],
+                    selectedText: "sample"
+                )
+            )
+        )
+        for (actual, expected) in zip(createdMarkup.quadPoints, quad.points) {
+            #expect(abs(actual.x - expected.x) < 0.05)
+            #expect(abs(actual.y - expected.y) < 0.05)
+        }
     }
 
     @MainActor

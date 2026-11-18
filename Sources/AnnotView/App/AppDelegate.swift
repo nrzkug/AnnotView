@@ -38,7 +38,7 @@ private struct AnnotationUndoCommands: Commands {
                 Task { await documentManager.undoAnnotationChange() }
             }
             .keyboardShortcut("z", modifiers: .command)
-            .disabled(documentManager.isSavingAnnotation || undoIsDisabled)
+            .disabled(documentManager.isSavingAnnotation || !documentManager.updatingAnnotationIDs.isEmpty || undoIsDisabled)
 
             Button(activeTextUndoManager == nil ? documentManager.redoAnnotationTitle : "Redo") {
                 if let undoManager = activeTextUndoManager {
@@ -48,7 +48,7 @@ private struct AnnotationUndoCommands: Commands {
                 Task { await documentManager.redoAnnotationChange() }
             }
             .keyboardShortcut("z", modifiers: [.command, .shift])
-            .disabled(documentManager.isSavingAnnotation || redoIsDisabled)
+            .disabled(documentManager.isSavingAnnotation || !documentManager.updatingAnnotationIDs.isEmpty || redoIsDisabled)
         }
     }
 

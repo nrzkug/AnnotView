@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 struct ReaderCommands: Commands {
@@ -9,13 +10,30 @@ struct ReaderCommands: Commands {
 
     var body: some Commands {
         CommandGroup(replacing: .newItem) {
-            Button("Open PDF…") { documentManager.requestOpenPanel() }
-                .keyboardShortcut("o", modifiers: .command)
+            Button("Open PDF…") {
+                if AnnotViewApplicationModel.shared.activeDocument != nil,
+                   documentManager.document == nil {
+                    documentManager.requestOpenPanel()
+                } else {
+                    NSDocumentController.shared.openDocument(nil)
+                }
+            }
+            .keyboardShortcut("o", modifiers: .command)
 
             Menu("Open Recent") {
                 ForEach(documentManager.recentDocuments, id: \.self) { url in
                     Button(url.lastPathComponent) {
-                        Task { await documentManager.open(url: url) }
+                        if let existing = NSDocumentController.shared.document(for: url) {
+                            existing.showWindows()
+                        } else if AnnotViewApplicationModel.shared.activeDocument != nil,
+                                  documentManager.document == nil {
+                            Task { await documentManager.open(url: url) }
+                        } else {
+                            NSDocumentController.shared.openDocument(
+                                withContentsOf: url,
+                                display: true
+                            ) { _, _, _ in }
+                        }
                     }
                     .help(url.deletingLastPathComponent().path)
                 }
@@ -109,6 +127,9 @@ struct ReaderCommands: Commands {
     }
 
     private var canApplyMarkup: Bool {
-        documentManager.document != nil && chromeState.hasMarkupSelection && !documentManager.isSavingAnnotation
+        documentManager.document != nil
+            && chromeState.hasMarkupSelection
+            && !documentManager.isSavingAnnotation
+            && documentManager.updatingAnnotationIDs.isEmpty
     }
 }

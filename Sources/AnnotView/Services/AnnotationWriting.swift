@@ -81,7 +81,7 @@ enum AnnotationMutation: Sendable {
         sourceID: String,
         contents: String,
         author: String,
-        color: Annotation.Color,
+        color: Annotation.Color?,
         modifiedAt: Date
     )
     case move(sourceID: String, rect: CGRect, modifiedAt: Date)
@@ -162,7 +162,7 @@ extension AnnotationWriting {
         sourceID: String,
         contents: String,
         author: String,
-        color: Annotation.Color,
+        color: Annotation.Color? = nil,
         modifiedAt: Date
     ) async throws {
         try await perform(

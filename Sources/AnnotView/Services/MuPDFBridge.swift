@@ -92,7 +92,12 @@ enum MuPDFBridge {
     static func replaceAtomically(_ source: URL, with output: URL, action: String) throws {
         let data = try Data(contentsOf: output)
         guard !data.isEmpty else { throw Failure.emptyOutput(action: action) }
-        try data.write(to: source, options: .atomic)
+        let target = source.resolvingSymlinksInPath()
+        do {
+            _ = try FileManager.default.replaceItemAt(target, withItemAt: output)
+        } catch {
+            try data.write(to: target, options: .atomic)
+        }
     }
 
     private static func check(

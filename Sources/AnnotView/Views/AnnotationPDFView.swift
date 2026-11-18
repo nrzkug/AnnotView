@@ -59,7 +59,7 @@ final class AnnotationPDFView: PDFView, @preconcurrency PDFPageOverlayViewProvid
     var onCreateMarkupRequest: (@MainActor (Annotation.Kind, PDFMarkupSelection) -> Void)?
     var onCreateNoteRequest: (@MainActor (PDFPagePoint) -> Void)?
     var onCreateInsertTextRequest: (@MainActor (PDFPagePoint) -> Void)?
-    var onUpdateAnnotation: (@MainActor (Annotation, String, Annotation.Color) async -> Bool)?
+    var onUpdateAnnotation: (@MainActor (Annotation, String) async -> Bool)?
     var onUpdateStatus: (@MainActor (Annotation, Annotation.Status) async -> Bool)?
     var onMoveAnnotationRequest: (@MainActor (Annotation, CGRect) -> Void)?
     var onDeleteAnnotation: (@MainActor (Annotation) async -> Bool)?
@@ -75,6 +75,8 @@ final class AnnotationPDFView: PDFView, @preconcurrency PDFPageOverlayViewProvid
     private weak var observedClipView: NSClipView?
     private var scrollObserver: NSObjectProtocol?
     private var dragState: (annotation: Annotation, page: PDFPage, startViewPoint: CGPoint, startBounds: CGRect, didMove: Bool)?
+    private var pendingMarkupClick: (annotation: Annotation, page: PDFPage, startViewPoint: CGPoint)?
+    private var didReceiveMouseUpForMarkupClick = false
     /// Click/drag discrimination in view-space points. Measuring in page
     /// coordinates would shrink the threshold as the document zooms out and
     /// swallow ordinary clicks as annotation moves.
@@ -143,6 +145,8 @@ final class AnnotationPDFView: PDFView, @preconcurrency PDFPageOverlayViewProvid
     }
 
     func resetAnnotationInteraction() {
+        dragState = nil
+        pendingMarkupClick = nil
         interactionController.reset()
         popoverCoordinator.reset()
     }
@@ -174,8 +178,7 @@ final class AnnotationPDFView: PDFView, @preconcurrency PDFPageOverlayViewProvid
     }
 
     func pdfView(_ view: PDFView, overlayViewFor page: PDFPage) -> NSView? {
-        guard let document else { return nil }
-        let pageIndex = document.index(for: page)
+        guard let document, let pageIndex = document.validPageIndex(for: page) else { return nil }
         let overlay = AnnotationPageOverlayView(
             pdfView: self,
             page: page,
@@ -252,9 +255,30 @@ final class AnnotationPDFView: PDFView, @preconcurrency PDFPageOverlayViewProvid
             return
         }
         if let target = annotationTarget(at: viewPoint) {
+            interactionController.cancelPendingHoverPresentation()
+            if target.annotation.kind == .highlight
+                || target.annotation.kind == .underline
+                || target.annotation.kind == .strikeout {
+                // Text markup sits directly over selectable text: let PDFKit
+                // track drag-selection, and upgrade a plain click to pin/edit.
+                pendingMarkupClick = (
+                    annotation: target.annotation,
+                    page: target.page,
+                    startViewPoint: viewPoint
+                )
+                didReceiveMouseUpForMarkupClick = false
+                clearSelection()
+                super.mouseDown(with: event)
+                if let pending = pendingMarkupClick,
+                   !didReceiveMouseUpForMarkupClick,
+                   NSApp.currentEvent?.type == .leftMouseUp {
+                    pendingMarkupClick = nil
+                    finalizeMarkupClickOrSelection(pending)
+                }
+                return
+            }
             suppressesMarkupOnMouseUp = true
             onSelectAnnotationRequest?(target.annotation.id)
-            interactionController.cancelPendingHoverPresentation()
             if target.annotation.kind == .note {
                 // Notes stay movable: pin the preview on press, and only if
                 // the gesture crosses the drag threshold does mouseDragged
@@ -267,23 +291,25 @@ final class AnnotationPDFView: PDFView, @preconcurrency PDFPageOverlayViewProvid
                     didMove: false
                 )
             }
-            // Markup kinds, carets, and notes pin the preview on press. The
-            // hover preview is semitransient, so it is still open here and
-            // gets upgraded in place rather than racing a closing popover.
+            // Carets and notes pin the preview on press. The hover preview is
+            // semitransient, so it is still open here and gets upgraded in place
+            // rather than racing a closing popover.
             handleAnnotationPresentation(target.annotation, on: target.page, request: .documentClick)
             return
         }
         if annotationTool == .note || annotationTool == .insertText,
            let page = page(for: viewPoint, nearest: false),
-           let document {
+           let document,
+           let pageIndex = document.validPageIndex(for: page) {
             suppressesMarkupOnMouseUp = true
+            popoverCoordinator.dismiss()
             onDeselectAnnotationRequest?()
             let rawPoint = convert(viewPoint, to: page)
             let point = annotationTool == .insertText
                 ? insertionPoint(for: rawPoint, on: page)
                 : rawPoint
             let location = PDFPagePoint(
-                pageIndex: document.index(for: page),
+                pageIndex: pageIndex,
                 point: point
             )
             if annotationTool == .note {
@@ -293,11 +319,23 @@ final class AnnotationPDFView: PDFView, @preconcurrency PDFPageOverlayViewProvid
             }
             return
         }
+        popoverCoordinator.dismiss()
         onDeselectAnnotationRequest?()
         super.mouseDown(with: event)
     }
 
     override func mouseDragged(with event: NSEvent) {
+        if let pending = pendingMarkupClick {
+            let viewPoint = convert(event.locationInWindow, from: nil)
+            if hypot(
+                viewPoint.x - pending.startViewPoint.x,
+                viewPoint.y - pending.startViewPoint.y
+            ) >= Self.annotationDragThreshold {
+                popoverCoordinator.dismiss()
+            }
+            super.mouseDragged(with: event)
+            return
+        }
         guard var drag = dragState else {
             super.mouseDragged(with: event)
             return
@@ -317,6 +355,13 @@ final class AnnotationPDFView: PDFView, @preconcurrency PDFPageOverlayViewProvid
     }
 
     override func mouseUp(with event: NSEvent) {
+        if let pending = pendingMarkupClick {
+            didReceiveMouseUpForMarkupClick = true
+            pendingMarkupClick = nil
+            super.mouseUp(with: event)
+            finalizeMarkupClickOrSelection(pending)
+            return
+        }
         if let drag = dragState {
             dragState = nil
             // The preview was already pinned on mouseDown; mouseUp only
@@ -330,6 +375,21 @@ final class AnnotationPDFView: PDFView, @preconcurrency PDFPageOverlayViewProvid
         guard !suppressesMarkupOnMouseUp,
               let kind = annotationTool.markupKind else { return }
         createMarkupFromActiveSelection(kind: kind)
+    }
+
+    private func finalizeMarkupClickOrSelection(
+        _ pending: (annotation: Annotation, page: PDFPage, startViewPoint: CGPoint)
+    ) {
+        if let selected = currentSelection?.string, !selected.isEmpty {
+            popoverCoordinator.dismiss()
+            onDeselectAnnotationRequest?()
+            if let kind = annotationTool.markupKind {
+                createMarkupFromActiveSelection(kind: kind)
+            }
+        } else {
+            onSelectAnnotationRequest?(pending.annotation.id)
+            handleAnnotationPresentation(pending.annotation, on: pending.page, request: .documentClick)
+        }
     }
 
     private func updateDrag(to viewPoint: CGPoint) {
@@ -377,9 +437,11 @@ final class AnnotationPDFView: PDFView, @preconcurrency PDFPageOverlayViewProvid
     }
 
     private func pagePoint(at viewPoint: CGPoint) -> PDFPagePoint? {
-        guard let page = page(for: viewPoint, nearest: false), let document else { return nil }
+        guard let page = page(for: viewPoint, nearest: false),
+              let document,
+              let pageIndex = document.validPageIndex(for: page) else { return nil }
         return PDFPagePoint(
-            pageIndex: document.index(for: page),
+            pageIndex: pageIndex,
             point: convert(viewPoint, to: page)
         )
     }
@@ -411,8 +473,8 @@ final class AnnotationPDFView: PDFView, @preconcurrency PDFPageOverlayViewProvid
         for line in lines {
             for page in line.pages {
                 let bounds = line.bounds(for: page)
-                guard bounds.width > 0.01, bounds.height > 0.01 else { continue }
-                let pageIndex = document.index(for: page)
+                guard bounds.width > 0.01, bounds.height > 0.01,
+                      let pageIndex = document.validPageIndex(for: page) else { continue }
                 quadsByPage[pageIndex, default: []].append(
                     PDFMarkupQuad(
                         topLeft: CGPoint(x: bounds.minX, y: bounds.maxY),
@@ -427,8 +489,8 @@ final class AnnotationPDFView: PDFView, @preconcurrency PDFPageOverlayViewProvid
         if quadsByPage.isEmpty {
             for page in selection.pages {
                 let bounds = selection.bounds(for: page)
-                guard bounds.width > 0.01, bounds.height > 0.01 else { continue }
-                let pageIndex = document.index(for: page)
+                guard bounds.width > 0.01, bounds.height > 0.01,
+                      let pageIndex = document.validPageIndex(for: page) else { continue }
                 quadsByPage[pageIndex, default: []].append(
                     PDFMarkupQuad(
                         topLeft: CGPoint(x: bounds.minX, y: bounds.maxY),
@@ -582,9 +644,14 @@ final class AnnotationPDFView: PDFView, @preconcurrency PDFPageOverlayViewProvid
         return false
     }
 
+    func liveAnnotation(id: UUID, fallback: Annotation) -> Annotation {
+        overlayAnnotations.values.joined().first(where: { $0.id == id }) ?? fallback
+    }
+
     private func annotationTarget(at viewPoint: CGPoint) -> (annotation: Annotation, page: PDFPage)? {
-        guard let page = page(for: viewPoint, nearest: false), let document else { return nil }
-        let pageIndex = document.index(for: page)
+        guard let page = page(for: viewPoint, nearest: false),
+              let document,
+              let pageIndex = document.validPageIndex(for: page) else { return nil }
         let pagePoint = convert(viewPoint, to: page)
         guard let annotation = overlayAnnotations[pageIndex]?.last(where: {
             AnnotationOverlayRenderer.contains(pagePoint, in: $0)

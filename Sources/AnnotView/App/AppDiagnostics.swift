@@ -12,6 +12,12 @@ enum AppDiagnostics {
         let bundle = Bundle.main
         let version = bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "Development"
         let build = bundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "unversioned"
+        let currentPageDescription: String = if documentManager.document != nil,
+            (0..<documentManager.pageCount).contains(documentManager.selectedPageIndex) {
+            String(documentManager.selectedPageIndex + 1)
+        } else {
+            "None"
+        }
         let report = """
         AnnotView \(version) (\(build))
         macOS: \(ProcessInfo.processInfo.operatingSystemVersionString)
@@ -20,7 +26,7 @@ enum AppDiagnostics {
         Updates: \(updater.diagnosticStatus)
         Document open: \(documentManager.document != nil)
         Pages: \(documentManager.pageCount)
-        Current page: \(documentManager.document == nil ? "None" : String(documentManager.selectedPageIndex + 1))
+        Current page: \(currentPageDescription)
         Annotations loaded: \(documentManager.annotations.count)
         Loading annotations: \(documentManager.isLoadingAnnotations)
         Saving annotations: \(documentManager.isSavingAnnotation)

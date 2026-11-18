@@ -49,12 +49,20 @@ struct PDFKitDocumentBuilder: PDFDocumentBuilding {
         let children = (0..<outline.numberOfChildren).compactMap { index in
             outline.child(at: index).map { makeOutlineItem($0, document: document) }
         }
-        let pageIndex = outline.destination?.page.map(document.index(for:))
+        let pageIndex = outline.destination?.page.flatMap(document.validPageIndex(for:))
         let title = outline.label?.trimmingCharacters(in: .whitespacesAndNewlines)
         return DocumentOutlineItem(
             title: title.flatMap { $0.isEmpty ? nil : $0 } ?? "Untitled",
             pageIndex: pageIndex,
             children: children
         )
+    }
+}
+
+extension PDFDocument {
+    func validPageIndex(for page: PDFPage) -> Int? {
+        let index = self.index(for: page)
+        guard index != NSNotFound, index >= 0, index < pageCount else { return nil }
+        return index
     }
 }

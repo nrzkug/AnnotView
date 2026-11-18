@@ -98,7 +98,13 @@ final class AnnotationPopoverCoordinator: NSObject, NSPopoverDelegate {
         if closedPopover === popover {
             popover = nil
             activePopover = nil
+            positionedAnnotation = nil
+            positionedPage = nil
             hoverDismissTask?.cancel()
+            if let monitor = popoverMouseDownMonitor {
+                NSEvent.removeMonitor(monitor)
+                popoverMouseDownMonitor = nil
+            }
         }
         // A popover can only be shown once its predecessor has fully closed:
         // showing a second popover on the same positioning view while the first
@@ -185,17 +191,25 @@ final class AnnotationPopoverCoordinator: NSObject, NSPopoverDelegate {
 
     private func makePreviewConfiguration(
         for annotation: Annotation,
-        presentationID: UUID
+        presentationID: UUID,
+        startEditing: Bool = false
     ) -> AnnotationPreviewConfiguration {
         AnnotationPreviewConfiguration(
             annotation: annotation,
+            startEditing: startEditing,
             onSave: { [weak self] contents in
-                guard let self, let update = self.hostView?.onUpdateAnnotation else { return false }
-                return await update(annotation, contents, annotation.color)
+                guard let self, let hostView = self.hostView, let update = hostView.onUpdateAnnotation else {
+                    return false
+                }
+                let current = hostView.liveAnnotation(id: annotation.id, fallback: annotation)
+                return await update(current, contents)
             },
             onUpdateStatus: { [weak self] status in
-                guard let self, let update = self.hostView?.onUpdateStatus else { return false }
-                return await update(annotation, status)
+                guard let self, let hostView = self.hostView, let update = hostView.onUpdateStatus else {
+                    return false
+                }
+                let current = hostView.liveAnnotation(id: annotation.id, fallback: annotation)
+                return await update(current, status)
             },
             onHeightChange: { [weak self] height in
                 guard let self,
@@ -205,6 +219,7 @@ final class AnnotationPopoverCoordinator: NSObject, NSPopoverDelegate {
                 let target = NSSize(width: AnnotationPopoverView.width, height: ceil(height))
                 guard abs(popover.contentSize.height - target.height) > 0.5 else { return }
                 popover.contentSize = target
+                self.applyOpaqueCardStyle(to: popover)
             },
             onPin: { [weak self] in
                 self?.pinCurrentPreview()
@@ -257,6 +272,7 @@ final class AnnotationPopoverCoordinator: NSObject, NSPopoverDelegate {
         )
         popover.show(relativeTo: anchor, of: hostView, preferredEdge: .maxX)
         applyOpaqueCardStyle(to: popover)
+        monitorClicksInsidePopover()
 
         if case .preview(pinned: false) = state.kind {
             monitorHoverPreview(for: annotation.id)
@@ -276,27 +292,23 @@ final class AnnotationPopoverCoordinator: NSObject, NSPopoverDelegate {
             presentationID: presentationID,
             kind: .editor
         )
-        let size = NSSize(width: 360, height: 286)
-        let rootView = AnnotationEditorView(
-            annotation: annotation,
-            onSave: { [weak self] contents, color in
-                guard let self, let update = self.hostView?.onUpdateAnnotation else { return false }
-                let saved = await update(annotation, contents, color)
-                if saved { self.dismiss(presentationID: presentationID) }
-                return saved
-            },
-            onDelete: { [weak self] in
-                guard let self, let delete = self.hostView?.onDeleteAnnotation else { return false }
-                let deleted = await delete(annotation)
-                if deleted { self.dismiss(presentationID: presentationID) }
-                return deleted
-            },
-            onCancel: { [weak self] in
-                self?.dismiss(presentationID: presentationID)
-            }
+        // The editor is the same preview card with its comment editor already
+        // active, so empty annotations and explicit edits look and behave like
+        // every other comment presentation.
+        let height = AnnotationPopoverView.preferredHeight(for: annotation.contents ?? "")
+        let size = NSSize(width: AnnotationPopoverView.width, height: height)
+        let configuration = makePreviewConfiguration(
+            for: annotation,
+            presentationID: presentationID,
+            startEditing: true
         )
         install(
-            makePopover(size: size, rootView: rootView),
+            makePopover(
+                size: size,
+                rootView: AnnotationPreviewSwapView(
+                    model: AnnotationPreviewModel(configuration: configuration)
+                )
+            ),
             state: state,
             annotation: annotation,
             page: page
@@ -452,7 +464,7 @@ final class AnnotationPopoverCoordinator: NSObject, NSPopoverDelegate {
             context.duration = 0.08
             context.allowsImplicitAnimation = true
             window.animator().alphaValue = 0
-        } completionHandler: {
+        } completionHandler: { [weak self] in
             Task { @MainActor [weak self] in
                 closingPopover.close()
                 guard let self else { return }
@@ -468,11 +480,6 @@ final class AnnotationPopoverCoordinator: NSObject, NSPopoverDelegate {
                 self.flushPendingShow()
             }
         }
-    }
-
-    private func dismiss(presentationID: UUID) {
-        guard activePopover?.presentationID == presentationID else { return }
-        dismiss()
     }
 
     /// Polling cadence for the hover preview's leave detection. Two misses at

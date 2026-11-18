@@ -71,18 +71,6 @@ struct Annotation: Identifiable, Hashable, Sendable {
             }
         }
 
-        var symbolName: String {
-            switch self {
-            case .none: "circle"
-            case .accepted: "checkmark.circle"
-            case .rejected: "xmark.circle"
-            case .cancelled: "slash.circle"
-            case .completed: "checkmark.circle.fill"
-            case .marked: "flag.fill"
-            case .unmarked: "flag"
-            }
-        }
-
         /// Lucide asset names, matching the toolbar icon catalog.
         var iconName: String {
             switch self {
@@ -105,10 +93,6 @@ struct Annotation: Identifiable, Hashable, Sendable {
         static let yellow = Color(red: 1, green: 0.819608, blue: 0, alpha: 0.35)
         static let green = Color(red: 0.243, green: 0.725, blue: 0.353, alpha: 1)
         static let red = Color(red: 0.9, green: 0.15, blue: 0.12, alpha: 0.9)
-
-        func replacingRGB(red: CGFloat, green: CGFloat, blue: CGFloat) -> Color {
-            Color(red: red, green: green, blue: blue, alpha: alpha)
-        }
     }
 
     var id: UUID

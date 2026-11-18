@@ -20,7 +20,7 @@ struct PDFKitPageView: NSViewRepresentable {
     let onCreateMarkupRequest: @MainActor (Annotation.Kind, PDFMarkupSelection) -> Void
     let onCreateNoteRequest: @MainActor (PDFPagePoint) -> Void
     let onCreateInsertTextRequest: @MainActor (PDFPagePoint) -> Void
-    let onUpdateAnnotation: @MainActor (Annotation, String, Annotation.Color) async -> Bool
+    let onUpdateAnnotation: @MainActor (Annotation, String) async -> Bool
     let onUpdateStatus: @MainActor (Annotation, Annotation.Status) async -> Bool
     let onMoveAnnotationRequest: @MainActor (Annotation, CGRect) -> Void
     let onDeleteAnnotation: @MainActor (Annotation) async -> Bool
@@ -112,7 +112,7 @@ struct PDFKitPageView: NSViewRepresentable {
 
         if !handledAnnotationNavigation,
            let currentPage = view.currentPage,
-           document.index(for: currentPage) != selectedPageIndex,
+           document.validPageIndex(for: currentPage) != selectedPageIndex,
            let targetPage = document.page(at: selectedPageIndex) {
             view.go(to: targetPage)
         }
@@ -151,8 +151,9 @@ struct PDFKitPageView: NSViewRepresentable {
                 queue: .main
             ) { [weak self, weak view] _ in
                 Task { @MainActor [weak self, weak view] in
-                    guard let self, let view, let page = view.currentPage else { return }
-                    self.selectedPageIndex.wrappedValue = view.document?.index(for: page) ?? 0
+                    guard let self, let view, let page = view.currentPage,
+                          let pageIndex = view.document?.validPageIndex(for: page) else { return }
+                    self.selectedPageIndex.wrappedValue = pageIndex
                 }
             }
         }

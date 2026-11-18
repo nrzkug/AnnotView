@@ -127,8 +127,8 @@ actor MuPDFAnnotationWriter: AnnotationWriting {
                 author: normalized(author),
                 contents: normalized(contents),
                 timestamp: timestamp(modifiedAt),
-                color: color.components,
-                opacity: Double(color.alpha)
+                color: color?.components,
+                opacity: color.map { Double($0.alpha) }
             )
         case let .delete(sourceID):
             return OperationPayload(operation: "delete", sourceID: sourceID)

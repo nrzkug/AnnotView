@@ -5,6 +5,8 @@ import SwiftUI
 /// annotation. Kept as a value so a visible popover can swap previews in place.
 struct AnnotationPreviewConfiguration {
     let annotation: Annotation
+    /// Opens the card with its comment editor already active.
+    let startEditing: Bool
     let onSave: @MainActor (String) async -> Bool
     let onUpdateStatus: @MainActor (Annotation.Status) async -> Bool
     let onHeightChange: @MainActor (CGFloat) -> Void
@@ -34,6 +36,7 @@ struct AnnotationPreviewSwapView: View {
         ZStack(alignment: .topLeading) {
             AnnotationPopoverView(
                 annotation: model.configuration.annotation,
+                startEditing: model.configuration.startEditing,
                 onSave: model.configuration.onSave,
                 onUpdateStatus: model.configuration.onUpdateStatus,
                 onHeightChange: model.configuration.onHeightChange,
@@ -61,7 +64,7 @@ struct AnnotationPopoverView: View {
     @State private var draft = ""
     @State private var isSaving = false
     @State private var copied = false
-    @State private var expanded = false
+    @State private var fullTextHeight: CGFloat?
     @State private var hoveringCopy = false
     @State private var hoveringStatus = false
     @State private var menuTarget = AnnotationStatusMenuTarget()
@@ -72,9 +75,11 @@ struct AnnotationPopoverView: View {
     private static let textWidth: CGFloat = 340
     private static let textFontSize: CGFloat = 13.3
     private static let textLineSpacing: CGFloat = 4
+    private static let maxCommentHeight: CGFloat = 480
 
     init(
         annotation: Annotation,
+        startEditing: Bool = false,
         onSave: @escaping @MainActor (String) async -> Bool,
         onUpdateStatus: @escaping @MainActor (Annotation.Status) async -> Bool,
         onHeightChange: @escaping @MainActor (CGFloat) -> Void,
@@ -90,6 +95,8 @@ struct AnnotationPopoverView: View {
         let contents = annotation.contents?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         _commentText = State(initialValue: contents)
         _status = State(initialValue: annotation.status)
+        _isEditing = State(initialValue: startEditing)
+        _draft = State(initialValue: contents)
     }
 
     var body: some View {
@@ -251,48 +258,39 @@ struct AnnotationPopoverView: View {
     }
 
     private var commentSection: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            if expanded {
-                ScrollView(.vertical, showsIndicators: false) {
+        Group {
+            if effectiveFullTextHeight > Self.maxCommentHeight + 0.5 {
+                ScrollView(.vertical) {
                     commentText(for: displayText)
                 }
-                .frame(maxHeight: 220)
+                .frame(height: Self.maxCommentHeight)
             } else {
                 commentText(for: displayText)
-                    .lineLimit(5)
-            }
-
-            if isTruncatable {
-                Button {
-                    withAnimation(.easeOut(duration: 0.16)) {
-                        expanded.toggle()
-                    }
-                } label: {
-                    HStack(spacing: 3) {
-                        Text(expanded ? "Show less" : "Show all")
-                        Image("chevron-down", bundle: .module)
-                            .resizable()
-                            .scaledToFit()
-                            .frame(width: 11, height: 11)
-                            .rotationEffect(.degrees(expanded ? 180 : 0))
-                    }
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.secondary)
-                }
-                .buttonStyle(.plain)
-                .padding(.top, 7)
             }
         }
         .padding(.init(top: 10, leading: 14, bottom: 14, trailing: 14))
         .frame(maxWidth: .infinity, alignment: .leading)
+        .background(alignment: .topLeading) {
+            measurableCommentText(for: displayText)
+                .padding(.horizontal, 14)
+                .hidden()
+                .accessibilityHidden(true)
+                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: {
+                    fullTextHeight = $0
+                }
+        }
     }
 
     private func commentText(for text: String) -> some View {
+        measurableCommentText(for: text)
+            .textSelection(.enabled)
+    }
+
+    private func measurableCommentText(for text: String) -> some View {
         Text(text)
             .font(.system(size: Self.textFontSize))
             .foregroundStyle(.primary)
             .lineSpacing(Self.textLineSpacing)
-            .textSelection(.enabled)
             .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -313,7 +311,7 @@ struct AnnotationPopoverView: View {
 
     private var editorHeight: CGFloat {
         let measured = Self.measuredTextHeight(draft.isEmpty ? " " : draft)
-        return min(220, max(21, ceil(measured)))
+        return min(Self.maxCommentHeight, max(21, ceil(measured)))
     }
 
     private var displayText: String {
@@ -346,14 +344,8 @@ struct AnnotationPopoverView: View {
         status.tint
     }
 
-    private var fiveLineHeight: CGFloat {
-        Self.measuredTextHeight(
-            Array(repeating: "Ag", count: 5).joined(separator: "\n")
-        )
-    }
-
-    private var isTruncatable: Bool {
-        Self.measuredTextHeight(displayText) > fiveLineHeight + 0.5
+    private var effectiveFullTextHeight: CGFloat {
+        fullTextHeight ?? Self.measuredTextHeight(displayText)
     }
 
     private func beginEditing() {
@@ -407,12 +399,8 @@ struct AnnotationPopoverView: View {
     static func preferredHeight(for comment: String) -> CGFloat {
         let text = comment.trimmingCharacters(in: .whitespacesAndNewlines)
         let measured = measuredTextHeight(text.isEmpty ? " " : text)
-        let fiveLines = measuredTextHeight(
-            Array(repeating: "Ag", count: 5).joined(separator: "\n")
-        )
-        let clamped = min(measured, fiveLines)
-        let more: CGFloat = measured > fiveLines + 0.5 ? 22 : 0
-        return min(400, max(86, 63 + ceil(clamped) + more))
+        let clamped = min(measured, maxCommentHeight)
+        return max(84, 63 + ceil(clamped))
     }
 
     static func measuredTextHeight(_ text: String) -> CGFloat {
@@ -464,123 +452,6 @@ private struct GhostIconButton: View {
         }
         .help(help)
         .accessibilityLabel(Text(help))
-    }
-}
-
-struct AnnotationEditorView: View {
-    let annotation: Annotation
-    let onSave: @MainActor (String, Annotation.Color) async -> Bool
-    let onDelete: @MainActor () async -> Bool
-    let onCancel: @MainActor () -> Void
-
-    @State private var contents: String
-    @State private var color: SwiftUI.Color
-    @State private var isSaving = false
-    @FocusState private var commentIsFocused: Bool
-
-    init(
-        annotation: Annotation,
-        onSave: @escaping @MainActor (String, Annotation.Color) async -> Bool,
-        onDelete: @escaping @MainActor () async -> Bool,
-        onCancel: @escaping @MainActor () -> Void
-    ) {
-        self.annotation = annotation
-        self.onSave = onSave
-        self.onDelete = onDelete
-        self.onCancel = onCancel
-        _contents = State(initialValue: annotation.contents ?? "")
-        _color = State(
-            initialValue: SwiftUI.Color(
-                red: annotation.color.red,
-                green: annotation.color.green,
-                blue: annotation.color.blue,
-                opacity: annotation.color.alpha
-            )
-        )
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 8) {
-                Image(annotation.kind.iconName, bundle: .module)
-                    .resizable()
-                    .scaledToFit()
-                    .frame(width: 15, height: 15)
-                    .foregroundStyle(color)
-                Text("Edit \(annotation.kind.displayName)")
-                    .font(.headline)
-                Spacer()
-                ColorPicker("Color", selection: $color, supportsOpacity: false)
-                    .labelsHidden()
-            }
-
-            VStack(alignment: .leading, spacing: 5) {
-                Text("Comment")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                TextEditor(text: $contents)
-                    .focused($commentIsFocused)
-                    .font(.body)
-                    .scrollContentBackground(.hidden)
-                    .padding(6)
-                    .background(Color(nsColor: .textBackgroundColor))
-                    .clipShape(RoundedRectangle(cornerRadius: 6))
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 6)
-                            .stroke(Color(nsColor: .separatorColor))
-                    }
-            }
-            .frame(minHeight: 150)
-
-            HStack {
-                Button("Delete", role: .destructive) {
-                    isSaving = true
-                    Task {
-                        _ = await onDelete()
-                        isSaving = false
-                    }
-                }
-                .disabled(isSaving)
-
-                Spacer()
-
-                if isSaving {
-                    ProgressView()
-                        .controlSize(.small)
-                    Text("Saving…")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-
-                Button("Cancel") { onCancel() }
-                    .keyboardShortcut(.cancelAction)
-                    .disabled(isSaving)
-
-                Button("Save") {
-                    isSaving = true
-                    Task {
-                        _ = await onSave(contents, pdfColor)
-                        isSaving = false
-                    }
-                }
-                .keyboardShortcut(.return, modifiers: .command)
-                .disabled(isSaving)
-            }
-        }
-        .padding(14)
-        .frame(width: 360, height: 286)
-        .onAppear { commentIsFocused = true }
-    }
-
-    private var pdfColor: Annotation.Color {
-        guard let converted = NSColor(color).usingColorSpace(.deviceRGB) else {
-            return annotation.color
-        }
-        return annotation.color.replacingRGB(
-            red: converted.redComponent,
-            green: converted.greenComponent,
-            blue: converted.blueComponent
-        )
     }
 }
 

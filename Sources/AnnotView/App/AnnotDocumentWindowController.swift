@@ -20,7 +20,7 @@ private struct AnnotViewDocumentRootView: View {
 @MainActor
 final class AnnotDocumentWindowController: NSWindowController, NSWindowDelegate {
     private var cancellables = Set<AnyCancellable>()
-    private unowned let pdfDoc: AnnotPDFDocument
+    private weak var pdfDoc: AnnotPDFDocument?
 
     init(document: AnnotPDFDocument) {
         self.pdfDoc = document
@@ -55,8 +55,11 @@ final class AnnotDocumentWindowController: NSWindowController, NSWindowDelegate 
 
         document.documentManager.$documentURL
             .receive(on: RunLoop.main)
-            .sink { [weak window] url in
+            .sink { [weak self, weak window] url in
                 guard let url else { return }
+                if self?.pdfDoc?.fileURL != url {
+                    self?.pdfDoc?.fileURL = url
+                }
                 window?.title = url.lastPathComponent
                 window?.representedURL = url
             }
@@ -68,14 +71,17 @@ final class AnnotDocumentWindowController: NSWindowController, NSWindowDelegate 
     }
 
     func windowDidBecomeMain(_ notification: Notification) {
+        guard let pdfDoc else { return }
         AnnotViewApplicationModel.shared.setActiveDocument(pdfDoc)
     }
 
     func windowDidBecomeKey(_ notification: Notification) {
+        guard let pdfDoc else { return }
         AnnotViewApplicationModel.shared.setActiveDocument(pdfDoc)
     }
 
     func windowWillClose(_ notification: Notification) {
+        guard let pdfDoc else { return }
         if AnnotViewApplicationModel.shared.activeDocument === pdfDoc {
             let remaining = NSDocumentController.shared.documents
                 .compactMap { $0 as? AnnotPDFDocument }

@@ -175,16 +175,14 @@ struct ContentView: View {
                 onCreateInsertTextRequest: { location in
                     Task { await documentManager.createCaret(at: location) }
                 },
-                onUpdateAnnotation: { annotation, contents, color in
+                onUpdateAnnotation: { annotation, contents in
                     await documentManager.updateAnnotation(
                         annotation,
-                        contents: contents,
-                        color: color
+                        contents: contents
                     )
                 },
                 onUpdateStatus: { annotation, status in
                     await documentManager.updateStatus(of: annotation, to: status)
-                    return true
                 },
                 onMoveAnnotationRequest: { annotation, rect in
                     Task { await documentManager.move(annotation, to: rect) }

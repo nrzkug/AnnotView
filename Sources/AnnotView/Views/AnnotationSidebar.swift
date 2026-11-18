@@ -345,8 +345,9 @@ private struct AnnotationListItem: View {
         // a dismissed preview is restored and the PDF returns to the comment.
         .onTapGesture {
             onFocusList()
-            if documentManager.selectedAnnotationIDs.contains(annotation.id) {
-                documentManager.goTo(annotation: annotation, preservingMultipleSelection: true)
+            let modifiers = NSEvent.modifierFlags.intersection([.command, .shift])
+            if modifiers.isEmpty, documentManager.selectedAnnotationIDs == [annotation.id] {
+                documentManager.goTo(annotation: annotation)
             }
         }
     }

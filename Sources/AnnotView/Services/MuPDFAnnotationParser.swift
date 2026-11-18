@@ -62,9 +62,10 @@ struct MuPDFAnnotationParser: AnnotationParsing {
         )
 
         let annotationsByID = Dictionary(
-            uniqueKeysWithValues: page.annotations.compactMap { annotation in
+            page.annotations.compactMap { annotation in
                 annotation.sourceID.map { ($0, annotation) }
-            }
+            },
+            uniquingKeysWith: { first, _ in first }
         )
         // Carets that are the IRT parent of another annotation (Acrobat
         // replacement edits) are already merged into that annotation's

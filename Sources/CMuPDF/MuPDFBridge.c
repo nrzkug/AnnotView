@@ -21,6 +21,33 @@ static void set_error(char **out_error, const char *msg) {
     }
 }
 
+static int utf8_sequence_length(const unsigned char *p) {
+    unsigned char b0 = p[0];
+    if (b0 < 0x80) return 1;
+    if (b0 >= 0xC2 && b0 <= 0xDF) {
+        if ((p[1] & 0xC0) == 0x80) return 2;
+        return 0;
+    }
+    if (b0 >= 0xE0 && b0 <= 0xEF) {
+        unsigned char b1 = p[1];
+        if (!b1 || (b1 & 0xC0) != 0x80) return 0;
+        if (b0 == 0xE0 && b1 < 0xA0) return 0;
+        if (b0 == 0xED && b1 >= 0xA0) return 0;
+        if ((p[2] & 0xC0) == 0x80) return 3;
+        return 0;
+    }
+    if (b0 >= 0xF0 && b0 <= 0xF4) {
+        unsigned char b1 = p[1];
+        if (!b1 || (b1 & 0xC0) != 0x80) return 0;
+        if (b0 == 0xF0 && b1 < 0x90) return 0;
+        if (b0 == 0xF4 && b1 >= 0x90) return 0;
+        if ((p[2] & 0xC0) != 0x80) return 0;
+        if ((p[3] & 0xC0) == 0x80) return 4;
+        return 0;
+    }
+    return 0;
+}
+
 static void escape_json_string(fz_context *ctx, fz_buffer *buf, const char *str) {
     if (!str) {
         fz_append_string(ctx, buf, "null");
@@ -30,24 +57,103 @@ static void escape_json_string(fz_context *ctx, fz_buffer *buf, const char *str)
     const unsigned char *p = (const unsigned char *)str;
     while (*p) {
         switch (*p) {
-            case '"': fz_append_string(ctx, buf, "\\\""); break;
-            case '\\': fz_append_string(ctx, buf, "\\\\"); break;
-            case '\b': fz_append_string(ctx, buf, "\\b"); break;
-            case '\f': fz_append_string(ctx, buf, "\\f"); break;
-            case '\n': fz_append_string(ctx, buf, "\\n"); break;
-            case '\r': fz_append_string(ctx, buf, "\\r"); break;
-            case '\t': fz_append_string(ctx, buf, "\\t"); break;
+            case '"': fz_append_string(ctx, buf, "\\\""); p++; break;
+            case '\\': fz_append_string(ctx, buf, "\\\\"); p++; break;
+            case '\b': fz_append_string(ctx, buf, "\\b"); p++; break;
+            case '\f': fz_append_string(ctx, buf, "\\f"); p++; break;
+            case '\n': fz_append_string(ctx, buf, "\\n"); p++; break;
+            case '\r': fz_append_string(ctx, buf, "\\r"); p++; break;
+            case '\t': fz_append_string(ctx, buf, "\\t"); p++; break;
             default:
                 if (*p < 32) {
                     fz_append_printf(ctx, buf, "\\u%04x", *p);
-                } else {
+                    p++;
+                } else if (*p < 0x80) {
                     fz_append_byte(ctx, buf, *p);
+                    p++;
+                } else {
+                    int seq_len = utf8_sequence_length(p);
+                    if (seq_len > 0) {
+                        for (int i = 0; i < seq_len; ++i) {
+                            fz_append_byte(ctx, buf, p[i]);
+                        }
+                        p += seq_len;
+                    } else {
+                        fz_append_string(ctx, buf, "\\ufffd");
+                        p++;
+                    }
                 }
                 break;
         }
-        p++;
     }
     fz_append_byte(ctx, buf, '"');
+}
+
+/*
+ * MuPDF 1.28.5's json_unescape_string omits `case '"'`, silently dropping
+ * `\"` escapes inside string literals while handling `\uXXXX` properly.
+ * Rewrite `\"` inside JSON strings to `\u0022` before calling fz_parse_json.
+ */
+static char *normalize_json_for_mupdf(const char *src) {
+    if (!src) return NULL;
+    size_t extra = 0;
+    bool in_string = false;
+    for (const char *p = src; *p; ) {
+        if (!in_string) {
+            if (*p == '"') in_string = true;
+            p++;
+        } else if (*p == '\\') {
+            if (p[1] == '"') {
+                extra += 4; /* `\"` (2) -> `\u0022` (6) */
+                p += 2;
+            } else if (p[1] != '\0') {
+                p += 2;
+            } else {
+                p++;
+            }
+        } else {
+            if (*p == '"') in_string = false;
+            p++;
+        }
+    }
+
+    size_t src_len = strlen(src);
+    char *out = (char *)malloc(src_len + extra + 1);
+    if (!out) return NULL;
+    if (extra == 0) {
+        memcpy(out, src, src_len + 1);
+        return out;
+    }
+
+    char *dst = out;
+    in_string = false;
+    for (const char *p = src; *p; ) {
+        if (!in_string) {
+            if (*p == '"') in_string = true;
+            *dst++ = *p++;
+        } else if (*p == '\\') {
+            if (p[1] == '"') {
+                memcpy(dst, "\\u0022", 6);
+                dst += 6;
+                p += 2;
+            } else if (p[1] != '\0') {
+                *dst++ = *p++;
+                *dst++ = *p++;
+            } else {
+                *dst++ = *p++;
+            }
+        } else {
+            if (*p == '"') in_string = false;
+            *dst++ = *p++;
+        }
+    }
+    *dst = '\0';
+    return out;
+}
+
+static const char *json_optional_string(fz_context *ctx, fz_json *val) {
+    if (!val || !fz_json_is_string(ctx, val)) return NULL;
+    return fz_json_to_string(ctx, val);
 }
 
 static void append_json_double(fz_context *ctx, fz_buffer *buf, double val) {
@@ -120,13 +226,26 @@ static pdf_annot *find_annot_by_source_id(fz_context *ctx, pdf_document *doc, co
     int page_count = pdf_count_pages(ctx, doc);
     for (int p = 0; p < page_count; ++p) {
         pdf_page *page = pdf_load_page(ctx, doc, p);
-        for (pdf_annot *annot = pdf_first_annot(ctx, page); annot; annot = pdf_next_annot(ctx, annot)) {
-            pdf_obj *obj = pdf_annot_obj(ctx, annot);
-            if (pdf_to_num(ctx, obj) == target_num) {
-                if (out_page) *out_page = page;
-                else fz_drop_page(ctx, &page->super);
-                return annot;
+        pdf_annot *found = NULL;
+        fz_var(page);
+        fz_var(found);
+        fz_try(ctx) {
+            for (pdf_annot *annot = pdf_first_annot(ctx, page); annot; annot = pdf_next_annot(ctx, annot)) {
+                pdf_obj *obj = pdf_annot_obj(ctx, annot);
+                if (pdf_to_num(ctx, obj) == target_num) {
+                    found = annot;
+                    break;
+                }
             }
+        }
+        fz_catch(ctx) {
+            fz_drop_page(ctx, &page->super);
+            fz_rethrow(ctx);
+        }
+        if (found) {
+            if (out_page) *out_page = page;
+            else fz_drop_page(ctx, &page->super);
+            return found;
         }
         fz_drop_page(ctx, &page->super);
     }
@@ -146,13 +265,19 @@ bool mupdf_bridge_parse_annotations(const char *pdf_path, char **out_json, char 
         set_error(out_error, "Failed to create MuPDF context");
         return false;
     }
-    fz_register_document_handlers(ctx);
 
     bool success = false;
     pdf_document *doc = NULL;
     fz_buffer *buf = NULL;
+    pdf_page *page = NULL;
+
+    fz_var(success);
+    fz_var(doc);
+    fz_var(buf);
+    fz_var(page);
 
     fz_try(ctx) {
+        fz_register_document_handlers(ctx);
         doc = pdf_open_document(ctx, pdf_path);
         int page_count = pdf_count_pages(ctx, doc);
         buf = fz_new_buffer(ctx, 4096);
@@ -161,14 +286,20 @@ bool mupdf_bridge_parse_annotations(const char *pdf_path, char **out_json, char 
 
         for (int p = 0; p < page_count; ++p) {
             if (p > 0) fz_append_string(ctx, buf, ",");
-            pdf_page *page = pdf_load_page(ctx, doc, p);
+            page = pdf_load_page(ctx, doc, p);
             fz_rect mediabox;
             fz_matrix ctm;
+            /*
+             * pdf_page_transform computes `ctm` mapping PDF user space -> fitz
+             * page space. MuPDFAnnotationParser expects `pageTransform` to map
+             * fitz page space -> PDF user space (`inv = fz_invert_matrix(ctm)`).
+             */
             pdf_page_transform(ctx, page, &mediabox, &ctm);
+            fz_matrix inv = fz_invert_matrix(ctm);
 
             fz_append_printf(ctx, buf, "{\"pageIndex\":%d,\"pageTransform\":", p);
-            double ctm_vals[6] = { ctm.a, ctm.b, ctm.c, ctm.d, ctm.e, ctm.f };
-            append_json_double_array(ctx, buf, ctm_vals, 6);
+            double inv_vals[6] = { inv.a, inv.b, inv.c, inv.d, inv.e, inv.f };
+            append_json_double_array(ctx, buf, inv_vals, 6);
             fz_append_string(ctx, buf, ",\"pageBounds\":");
             double mb_vals[4] = { mediabox.x0, mediabox.y0, mediabox.x1, mediabox.y1 };
             append_json_double_array(ctx, buf, mb_vals, 4);
@@ -191,9 +322,8 @@ bool mupdf_bridge_parse_annotations(const char *pdf_path, char **out_json, char 
                         float r1 = pdf_to_real(ctx, pdf_array_get(ctx, rect_obj, 1));
                         float r2 = pdf_to_real(ctx, pdf_array_get(ctx, rect_obj, 2));
                         float r3 = pdf_to_real(ctx, pdf_array_get(ctx, rect_obj, 3));
-                        fz_matrix inv = fz_invert_matrix(ctm);
-                        fz_point p0 = fz_transform_point_xy(r0, r1, inv);
-                        fz_point p1 = fz_transform_point_xy(r2, r3, inv);
+                        fz_point p0 = fz_transform_point_xy(r0, r1, ctm);
+                        fz_point p1 = fz_transform_point_xy(r2, r3, ctm);
                         bounds.x0 = fz_min(p0.x, p1.x);
                         bounds.y0 = fz_min(p0.y, p1.y);
                         bounds.x1 = fz_max(p0.x, p1.x);
@@ -213,8 +343,9 @@ bool mupdf_bridge_parse_annotations(const char *pdf_path, char **out_json, char 
                 if (parent_num > 0) fz_append_printf(ctx, buf, "\"%d 0 R\",", parent_num);
                 else fz_append_string(ctx, buf, "null,");
 
-                fz_append_printf(ctx, buf, "\"type\":\"%s\",", type_name ? type_name : "Unknown");
-                fz_append_string(ctx, buf, "\"bounds\":");
+                fz_append_string(ctx, buf, "\"type\":");
+                escape_json_string(ctx, buf, type_name ? type_name : "Unknown");
+                fz_append_string(ctx, buf, ",\"bounds\":");
                 double b_vals[4] = { bounds.x0, bounds.y0, bounds.x1, bounds.y1 };
                 append_json_double_array(ctx, buf, b_vals, 4);
                 fz_append_string(ctx, buf, ",");
@@ -242,7 +373,11 @@ bool mupdf_bridge_parse_annotations(const char *pdf_path, char **out_json, char 
                 escape_json_string(ctx, buf, pdf_annot_author(ctx, annot));
                 fz_append_string(ctx, buf, ",\"subject\":");
                 pdf_obj *subj_obj = pdf_dict_get(ctx, obj, PDF_NAME(Subj));
-                escape_json_string(ctx, buf, pdf_to_text_string(ctx, subj_obj));
+                if (pdf_is_name(ctx, subj_obj)) {
+                    escape_json_string(ctx, buf, pdf_to_name(ctx, subj_obj));
+                } else {
+                    escape_json_string(ctx, buf, pdf_to_text_string(ctx, subj_obj));
+                }
 
                 // Creation & Mod Date
                 fz_append_string(ctx, buf, ",\"creationDate\":");
@@ -278,6 +413,7 @@ bool mupdf_bridge_parse_annotations(const char *pdf_path, char **out_json, char 
             }
             fz_append_string(ctx, buf, "]}");
             fz_drop_page(ctx, &page->super);
+            page = NULL;
         }
         fz_append_string(ctx, buf, "]}");
 
@@ -297,6 +433,7 @@ bool mupdf_bridge_parse_annotations(const char *pdf_path, char **out_json, char 
         success = false;
     }
 
+    if (page) fz_drop_page(ctx, &page->super);
     if (buf) fz_drop_buffer(ctx, buf);
     if (doc) pdf_drop_document(ctx, doc);
     fz_drop_context(ctx);
@@ -310,20 +447,16 @@ static fz_point transform_point(fz_point pt, fz_matrix mat) {
     };
 }
 
-static fz_quad to_mupdf_quad(double *vals, fz_matrix inv) {
+static fz_quad to_mupdf_quad(const double *vals, fz_matrix ctm) {
     fz_point pts[4];
     for (int i = 0; i < 4; ++i) {
-        pts[i] = transform_point((fz_point){vals[i * 2], vals[i * 2 + 1]}, inv);
+        pts[i] = transform_point((fz_point){(float)vals[i * 2], (float)vals[i * 2 + 1]}, ctm);
     }
-    float min_x = fz_min(fz_min(pts[0].x, pts[1].x), fz_min(pts[2].x, pts[3].x));
-    float max_x = fz_max(fz_max(pts[0].x, pts[1].x), fz_max(pts[2].x, pts[3].x));
-    float min_y = fz_min(fz_min(pts[0].y, pts[1].y), fz_min(pts[2].y, pts[3].y));
-    float max_y = fz_max(fz_max(pts[0].y, pts[1].y), fz_max(pts[2].y, pts[3].y));
     return (fz_quad){
-        .ul = {min_x, min_y},
-        .ur = {max_x, min_y},
-        .ll = {min_x, max_y},
-        .lr = {max_x, max_y}
+        .ul = pts[0],
+        .ur = pts[1],
+        .ll = pts[2],
+        .lr = pts[3]
     };
 }
 
@@ -353,6 +486,47 @@ static void finish_appearance(fz_context *ctx, pdf_annot *annot, float opacity) 
     pdf_dict_put_real(ctx, obj, PDF_NAME(CA), opacity);
 }
 
+static void write_caret_appearance_stream(fz_context *ctx, pdf_document *doc, pdf_obj *caret_obj, const float color[3], float opacity) {
+    char glyph[256];
+    snprintf(glyph, sizeof(glyph),
+        "%g %g %g RG\n0.6007 w\n%g %g %g rg\n0 0 m\n3.8227 0 3.8227 3.0035 3.8227 6.007 c\n3.8227 3.0035 3.8227 0 7.6454 0 c\nh\nf\nS\n",
+        color[0], color[1], color[2], color[0], color[1], color[2]);
+
+    fz_buffer *stream_buf = NULL;
+    pdf_obj *ap_stream = NULL;
+    pdf_obj *ap_dict = NULL;
+    fz_var(stream_buf);
+    fz_var(ap_stream);
+    fz_var(ap_dict);
+
+    fz_try(ctx) {
+        stream_buf = fz_new_buffer_from_copied_data(ctx, (unsigned char *)glyph, strlen(glyph));
+        ap_stream = pdf_add_stream(ctx, doc, stream_buf, NULL, 0);
+        fz_drop_buffer(ctx, stream_buf);
+        stream_buf = NULL;
+
+        pdf_dict_put_name(ctx, ap_stream, PDF_NAME(Type), "XObject");
+        pdf_dict_put_name(ctx, ap_stream, PDF_NAME(Subtype), "Form");
+        pdf_dict_put_int(ctx, ap_stream, PDF_NAME(FormType), 1);
+        pdf_dict_put_rect(ctx, ap_stream, PDF_NAME(BBox), (fz_rect){-0.30035f, -0.30035f, 7.94575f, 6.30735f});
+
+        ap_dict = pdf_new_dict(ctx, doc, 1);
+        pdf_dict_put(ctx, ap_dict, PDF_NAME(N), ap_stream);
+        pdf_dict_put_drop(ctx, caret_obj, PDF_NAME(AP), ap_dict);
+        ap_dict = NULL;
+        pdf_drop_obj(ctx, ap_stream);
+        ap_stream = NULL;
+
+        pdf_dict_put_real(ctx, caret_obj, PDF_NAME(CA), opacity);
+    }
+    fz_catch(ctx) {
+        if (ap_dict) pdf_drop_obj(ctx, ap_dict);
+        if (ap_stream) pdf_drop_obj(ctx, ap_stream);
+        if (stream_buf) fz_drop_buffer(ctx, stream_buf);
+        fz_rethrow(ctx);
+    }
+}
+
 bool mupdf_bridge_write_annotations(const char *input_path, const char *output_path, const char *operations_json, char **out_error) {
     if (!input_path || !output_path || !operations_json) {
         set_error(out_error, "Invalid parameters to mupdf_bridge_write_annotations");
@@ -360,20 +534,40 @@ bool mupdf_bridge_write_annotations(const char *input_path, const char *output_p
     }
     if (out_error) *out_error = NULL;
 
+    char *normalized_json = normalize_json_for_mupdf(operations_json);
+    if (!normalized_json) {
+        set_error(out_error, "Out of memory normalizing operations JSON");
+        return false;
+    }
+
     fz_context *ctx = fz_new_context(NULL, NULL, FZ_STORE_UNLIMITED);
     if (!ctx) {
+        free(normalized_json);
         set_error(out_error, "Failed to create MuPDF context");
         return false;
     }
-    fz_register_document_handlers(ctx);
 
     bool success = false;
     pdf_document *doc = NULL;
-    fz_pool *pool = fz_new_pool(ctx);
+    fz_pool *pool = NULL;
+    pdf_page *page = NULL;
+    pdf_annot *created_annot = NULL;
+    fz_quad *mupdf_quads = NULL;
+    pdf_obj *preserved_rect = NULL;
+
+    fz_var(success);
+    fz_var(doc);
+    fz_var(pool);
+    fz_var(page);
+    fz_var(created_annot);
+    fz_var(mupdf_quads);
+    fz_var(preserved_rect);
 
     fz_try(ctx) {
+        fz_register_document_handlers(ctx);
+        pool = fz_new_pool(ctx);
         doc = pdf_open_document(ctx, input_path);
-        fz_json *root = fz_parse_json(ctx, pool, operations_json);
+        fz_json *root = fz_parse_json(ctx, pool, normalized_json);
         if (!root) fz_throw(ctx, FZ_ERROR_GENERIC, "Failed to parse operations JSON");
 
         fz_json *ops_arr = fz_json_object_get(ctx, root, "operations");
@@ -384,15 +578,17 @@ bool mupdf_bridge_write_annotations(const char *input_path, const char *output_p
         int op_count = fz_json_array_length(ctx, ops_arr);
         for (int i = 0; i < op_count; ++i) {
             fz_json *op = fz_json_array_get(ctx, ops_arr, i);
-            const char *op_name = fz_json_to_string(ctx, fz_json_object_get(ctx, op, "operation"));
-            if (!op_name) continue;
+            if (!op) continue;
+            const char *op_name = json_optional_string(ctx, fz_json_object_get(ctx, op, "operation"));
+            if (!op_name || !*op_name) continue;
 
             if (strcmp(op_name, "createMarkup") == 0) {
-                const char *subtype = fz_json_to_string(ctx, fz_json_object_get(ctx, op, "subtype"));
-                const char *name = fz_json_to_string(ctx, fz_json_object_get(ctx, op, "name"));
-                const char *author = fz_json_to_string(ctx, fz_json_object_get(ctx, op, "author"));
-                const char *contents = fz_json_to_string(ctx, fz_json_object_get(ctx, op, "contents"));
-                const char *timestamp = fz_json_to_string(ctx, fz_json_object_get(ctx, op, "timestamp"));
+                const char *subtype = json_optional_string(ctx, fz_json_object_get(ctx, op, "subtype"));
+                if (!subtype) fz_throw(ctx, FZ_ERROR_GENERIC, "Missing markup subtype");
+                const char *name = json_optional_string(ctx, fz_json_object_get(ctx, op, "name"));
+                const char *author = json_optional_string(ctx, fz_json_object_get(ctx, op, "author"));
+                const char *contents = json_optional_string(ctx, fz_json_object_get(ctx, op, "contents"));
+                const char *timestamp = json_optional_string(ctx, fz_json_object_get(ctx, op, "timestamp"));
                 float opacity = (float)fz_json_to_number(ctx, fz_json_object_get(ctx, op, "opacity"));
                 if (opacity <= 0) opacity = 1.0f;
 
@@ -406,77 +602,96 @@ bool mupdf_bridge_write_annotations(const char *input_path, const char *output_p
 
                 enum pdf_annot_type atype = pdf_annot_type_from_string(ctx, subtype);
                 fz_json *pages_arr = fz_json_object_get(ctx, op, "pages");
-                int npages = pages_arr ? fz_json_array_length(ctx, pages_arr) : 0;
+                int npages = (pages_arr && fz_json_is_array(ctx, pages_arr)) ? fz_json_array_length(ctx, pages_arr) : 0;
 
                 for (int pi = 0; pi < npages; ++pi) {
                     fz_json *page_item = fz_json_array_get(ctx, pages_arr, pi);
+                    if (!page_item) continue;
                     int pindex = (int)fz_json_to_number(ctx, fz_json_object_get(ctx, page_item, "pageIndex"));
-                    if (pindex < 0 || pindex >= pdf_count_pages(ctx, doc)) continue;
+                    if (pindex < 0 || pindex >= pdf_count_pages(ctx, doc)) {
+                        fz_throw(ctx, FZ_ERROR_GENERIC, "Page index %d out of range", pindex);
+                    }
 
-                    pdf_page *page = pdf_load_page(ctx, doc, pindex);
+                    page = pdf_load_page(ctx, doc, pindex);
                     fz_rect mbox; fz_matrix ctm;
                     pdf_page_transform(ctx, page, &mbox, &ctm);
-                    fz_matrix inv = fz_invert_matrix(ctm);
 
                     fz_json *quads_arr = fz_json_object_get(ctx, page_item, "quads");
-                    int nquads = quads_arr ? fz_json_array_length(ctx, quads_arr) : 0;
+                    int nquads = (quads_arr && fz_json_is_array(ctx, quads_arr)) ? fz_json_array_length(ctx, quads_arr) : 0;
                     if (nquads == 0) {
                         fz_drop_page(ctx, &page->super);
+                        page = NULL;
                         continue;
                     }
 
-                    fz_quad *mupdf_quads = (fz_quad *)malloc(sizeof(fz_quad) * nquads);
+                    mupdf_quads = (fz_quad *)malloc(sizeof(fz_quad) * (size_t)nquads);
+                    if (!mupdf_quads) {
+                        fz_throw(ctx, FZ_ERROR_SYSTEM, "Out of memory allocating quad points");
+                    }
                     for (int qi = 0; qi < nquads; ++qi) {
                         fz_json *q_arr = fz_json_array_get(ctx, quads_arr, qi);
+                        if (!q_arr || !fz_json_is_array(ctx, q_arr) || fz_json_array_length(ctx, q_arr) < 8) {
+                            fz_throw(ctx, FZ_ERROR_GENERIC, "Malformed quadPoints array");
+                        }
                         double vals[8];
                         for (int k = 0; k < 8; ++k) {
                             vals[k] = fz_json_to_number(ctx, fz_json_array_get(ctx, q_arr, k));
                         }
-                        mupdf_quads[qi] = to_mupdf_quad(vals, inv);
+                        mupdf_quads[qi] = to_mupdf_quad(vals, ctm);
                     }
 
-                    pdf_annot *annot = pdf_create_annot(ctx, page, atype);
-                    pdf_set_annot_quad_points(ctx, annot, nquads, mupdf_quads);
+                    created_annot = pdf_create_annot(ctx, page, atype);
+                    pdf_set_annot_quad_points(ctx, created_annot, nquads, mupdf_quads);
                     free(mupdf_quads);
+                    mupdf_quads = NULL;
 
-                    if (subtype && strcmp(subtype, "StrikeOut") == 0) {
-                        pdf_dict_put_name(ctx, pdf_annot_obj(ctx, annot), PDF_NAME(Subj), "Strikethrough");
-                    } else if (subtype) {
-                        pdf_dict_put_name(ctx, pdf_annot_obj(ctx, annot), PDF_NAME(Subj), subtype);
+                    if (strcmp(subtype, "StrikeOut") == 0) {
+                        pdf_dict_put_text_string(ctx, pdf_annot_obj(ctx, created_annot), PDF_NAME(Subj), "Strikethrough");
+                    } else {
+                        pdf_dict_put_text_string(ctx, pdf_annot_obj(ctx, created_annot), PDF_NAME(Subj), subtype);
                     }
 
                     char annot_name[256];
                     if (npages > 1) snprintf(annot_name, sizeof(annot_name), "%s-%d", name ? name : "Markup", pindex);
                     else snprintf(annot_name, sizeof(annot_name), "%s", name ? name : "Markup");
 
-                    set_common_fields(ctx, annot, annot_name, author, contents, timestamp, color, 3, opacity);
-                    finish_appearance(ctx, annot, opacity);
+                    set_common_fields(ctx, created_annot, annot_name, author, contents, timestamp, color, 3, opacity);
+                    finish_appearance(ctx, created_annot, opacity);
+                    pdf_drop_annot(ctx, created_annot);
+                    created_annot = NULL;
                     fz_drop_page(ctx, &page->super);
+                    page = NULL;
                 }
             } else if (strcmp(op_name, "createNote") == 0) {
                 fz_json *loc = fz_json_object_get(ctx, op, "location");
+                if (!loc) fz_throw(ctx, FZ_ERROR_GENERIC, "Missing note location");
                 int pindex = (int)fz_json_to_number(ctx, fz_json_object_get(ctx, loc, "pageIndex"));
+                if (pindex < 0 || pindex >= pdf_count_pages(ctx, doc)) {
+                    fz_throw(ctx, FZ_ERROR_GENERIC, "Page index %d out of range", pindex);
+                }
                 fz_json *pt_arr = fz_json_object_get(ctx, loc, "point");
+                if (!pt_arr || !fz_json_is_array(ctx, pt_arr) || fz_json_array_length(ctx, pt_arr) < 2) {
+                    fz_throw(ctx, FZ_ERROR_GENERIC, "Malformed note point");
+                }
                 double pt_x = fz_json_to_number(ctx, fz_json_array_get(ctx, pt_arr, 0));
                 double pt_y = fz_json_to_number(ctx, fz_json_array_get(ctx, pt_arr, 1));
 
-                pdf_page *page = pdf_load_page(ctx, doc, pindex);
+                page = pdf_load_page(ctx, doc, pindex);
                 fz_rect mbox; fz_matrix ctm;
                 pdf_page_transform(ctx, page, &mbox, &ctm);
-                fz_matrix inv = fz_invert_matrix(ctm);
-                fz_point note_pt = transform_point((fz_point){pt_x, pt_y}, inv);
+                fz_point note_pt = transform_point((fz_point){(float)pt_x, (float)pt_y}, ctm);
 
-                pdf_annot *note = pdf_create_annot(ctx, page, PDF_ANNOT_TEXT);
+                created_annot = pdf_create_annot(ctx, page, PDF_ANNOT_TEXT);
                 fz_rect note_rect = {note_pt.x - 10, note_pt.y - 10, note_pt.x + 10, note_pt.y + 10};
-                pdf_set_annot_rect(ctx, note, note_rect);
-                pdf_dict_put_name(ctx, pdf_annot_obj(ctx, note), PDF_NAME(Name), "Comment");
-                pdf_dict_put_name(ctx, pdf_annot_obj(ctx, note), PDF_NAME(Subj), "Sticky Note");
-                pdf_dict_put_bool(ctx, pdf_annot_obj(ctx, note), PDF_NAME(Open), 0);
+                pdf_set_annot_rect(ctx, created_annot, note_rect);
+                pdf_dict_put_name(ctx, pdf_annot_obj(ctx, created_annot), PDF_NAME(Name), "Comment");
+                pdf_dict_put_text_string(ctx, pdf_annot_obj(ctx, created_annot), PDF_NAME(Subj), "Sticky Note");
+                pdf_dict_put_bool(ctx, pdf_annot_obj(ctx, created_annot), PDF_NAME(Open), 0);
 
-                const char *name = fz_json_to_string(ctx, fz_json_object_get(ctx, op, "name"));
-                const char *author = fz_json_to_string(ctx, fz_json_object_get(ctx, op, "author"));
-                const char *contents = fz_json_to_string(ctx, fz_json_object_get(ctx, op, "contents"));
-                const char *timestamp = fz_json_to_string(ctx, fz_json_object_get(ctx, op, "timestamp"));
+                const char *name = json_optional_string(ctx, fz_json_object_get(ctx, op, "name"));
+                const char *author = json_optional_string(ctx, fz_json_object_get(ctx, op, "author"));
+                const char *contents = json_optional_string(ctx, fz_json_object_get(ctx, op, "contents"));
+                const char *timestamp = json_optional_string(ctx, fz_json_object_get(ctx, op, "timestamp"));
                 float opacity = (float)fz_json_to_number(ctx, fz_json_object_get(ctx, op, "opacity"));
                 if (opacity <= 0) opacity = 1.0f;
 
@@ -488,24 +703,34 @@ bool mupdf_bridge_write_annotations(const char *input_path, const char *output_p
                     color[2] = (float)fz_json_to_number(ctx, fz_json_array_get(ctx, c_arr, 2));
                 }
 
-                set_common_fields(ctx, note, name, author, contents, timestamp, color, 3, opacity);
-                finish_appearance(ctx, note, opacity);
+                set_common_fields(ctx, created_annot, name, author, contents, timestamp, color, 3, opacity);
+                finish_appearance(ctx, created_annot, opacity);
+                pdf_drop_annot(ctx, created_annot);
+                created_annot = NULL;
                 fz_drop_page(ctx, &page->super);
+                page = NULL;
             } else if (strcmp(op_name, "createCaret") == 0) {
                 fz_json *loc = fz_json_object_get(ctx, op, "location");
+                if (!loc) fz_throw(ctx, FZ_ERROR_GENERIC, "Missing caret location");
                 int pindex = (int)fz_json_to_number(ctx, fz_json_object_get(ctx, loc, "pageIndex"));
+                if (pindex < 0 || pindex >= pdf_count_pages(ctx, doc)) {
+                    fz_throw(ctx, FZ_ERROR_GENERIC, "Page index %d out of range", pindex);
+                }
                 fz_json *pt_arr = fz_json_object_get(ctx, loc, "point");
+                if (!pt_arr || !fz_json_is_array(ctx, pt_arr) || fz_json_array_length(ctx, pt_arr) < 2) {
+                    fz_throw(ctx, FZ_ERROR_GENERIC, "Malformed caret point");
+                }
                 double pt_x = fz_json_to_number(ctx, fz_json_array_get(ctx, pt_arr, 0));
                 double pt_y = fz_json_to_number(ctx, fz_json_array_get(ctx, pt_arr, 1));
 
-                pdf_page *page = pdf_load_page(ctx, doc, pindex);
-                pdf_annot *caret = pdf_create_annot(ctx, page, PDF_ANNOT_CARET);
-                pdf_dict_put_name(ctx, pdf_annot_obj(ctx, caret), PDF_NAME(Subj), "InsertedText");
+                page = pdf_load_page(ctx, doc, pindex);
+                created_annot = pdf_create_annot(ctx, page, PDF_ANNOT_CARET);
+                pdf_dict_put_text_string(ctx, pdf_annot_obj(ctx, created_annot), PDF_NAME(Subj), "InsertedText");
 
-                const char *name = fz_json_to_string(ctx, fz_json_object_get(ctx, op, "name"));
-                const char *author = fz_json_to_string(ctx, fz_json_object_get(ctx, op, "author"));
-                const char *contents = fz_json_to_string(ctx, fz_json_object_get(ctx, op, "contents"));
-                const char *timestamp = fz_json_to_string(ctx, fz_json_object_get(ctx, op, "timestamp"));
+                const char *name = json_optional_string(ctx, fz_json_object_get(ctx, op, "name"));
+                const char *author = json_optional_string(ctx, fz_json_object_get(ctx, op, "author"));
+                const char *contents = json_optional_string(ctx, fz_json_object_get(ctx, op, "contents"));
+                const char *timestamp = json_optional_string(ctx, fz_json_object_get(ctx, op, "timestamp"));
                 float opacity = (float)fz_json_to_number(ctx, fz_json_object_get(ctx, op, "opacity"));
                 if (opacity <= 0) opacity = 1.0f;
 
@@ -517,13 +742,10 @@ bool mupdf_bridge_write_annotations(const char *input_path, const char *output_p
                     color[2] = (float)fz_json_to_number(ctx, fz_json_array_get(ctx, c_arr, 2));
                 }
 
-                set_common_fields(ctx, caret, name, author, contents, timestamp, color, 3, opacity);
-                finish_appearance(ctx, caret, opacity);
+                set_common_fields(ctx, created_annot, name, author, contents, timestamp, color, 3, opacity);
+                finish_appearance(ctx, created_annot, opacity);
 
-                // PDFKit supplies unrotated PDF page coordinates. MuPDF's
-                // annotation setter expects transformed page coordinates,
-                // including the crop origin, Y flip, and page rotation.
-                pdf_obj *caret_obj = pdf_annot_obj(ctx, caret);
+                pdf_obj *caret_obj = pdf_annot_obj(ctx, created_annot);
                 fz_rect caret_rect = {
                     (float)(pt_x - 4.4235), (float)(pt_y - 3.6045),
                     (float)(pt_x + 4.4235), (float)(pt_y + 3.6045)
@@ -531,109 +753,110 @@ bool mupdf_bridge_write_annotations(const char *input_path, const char *output_p
                 fz_rect mbox;
                 fz_matrix ctm;
                 pdf_page_transform(ctx, page, &mbox, &ctm);
-                pdf_set_annot_rect(ctx, caret, fz_transform_rect(caret_rect, ctm));
+                pdf_set_annot_rect(ctx, created_annot, fz_transform_rect(caret_rect, ctm));
+                write_caret_appearance_stream(ctx, doc, caret_obj, color, opacity);
 
-                char glyph[256];
-                snprintf(glyph, sizeof(glyph),
-                    "%g %g %g RG\n0.6007 w\n%g %g %g rg\n0 0 m\n3.8227 0 3.8227 3.0035 3.8227 6.007 c\n3.8227 3.0035 3.8227 0 7.6454 0 c\nh\nf\nS\n",
-                    color[0], color[1], color[2], color[0], color[1], color[2]);
-
-                fz_buffer *stream_buf = fz_new_buffer_from_copied_data(ctx, (unsigned char *)glyph, strlen(glyph));
-                pdf_obj *ap_stream = pdf_add_stream(ctx, doc, stream_buf, NULL, 0);
-                fz_drop_buffer(ctx, stream_buf);
-
-                pdf_dict_put_name(ctx, ap_stream, PDF_NAME(Type), "XObject");
-                pdf_dict_put_name(ctx, ap_stream, PDF_NAME(Subtype), "Form");
-                pdf_dict_put_int(ctx, ap_stream, PDF_NAME(FormType), 1);
-                pdf_dict_put_rect(ctx, ap_stream, PDF_NAME(BBox), (fz_rect){-0.30035f, -0.30035f, 7.94575f, 6.30735f});
-
-                pdf_obj *ap_dict = pdf_new_dict(ctx, doc, 1);
-                pdf_dict_put(ctx, ap_dict, PDF_NAME(N), ap_stream);
-                pdf_dict_put_drop(ctx, caret_obj, PDF_NAME(AP), ap_dict);
-                pdf_drop_obj(ctx, ap_stream);
-
+                pdf_drop_annot(ctx, created_annot);
+                created_annot = NULL;
                 fz_drop_page(ctx, &page->super);
+                page = NULL;
             } else if (strcmp(op_name, "move") == 0) {
-                const char *source_id = fz_json_to_string(ctx, fz_json_object_get(ctx, op, "sourceID"));
-                pdf_page *page = NULL;
-                pdf_annot *annot = find_annot_by_source_id(ctx, doc, source_id, &page);
+                const char *source_id = json_optional_string(ctx, fz_json_object_get(ctx, op, "sourceID"));
+                pdf_page *found_page = NULL;
+                pdf_annot *annot = find_annot_by_source_id(ctx, doc, source_id, &found_page);
+                page = found_page;
                 if (!annot || !page) {
                     char err_buf[128];
                     snprintf(err_buf, sizeof(err_buf), "annotation object %s was not found", source_id ? source_id : "null");
                     fz_throw(ctx, FZ_ERROR_GENERIC, "%s", err_buf);
                 }
                 fz_json *r_arr = fz_json_object_get(ctx, op, "rect");
-                if (r_arr && fz_json_array_length(ctx, r_arr) == 4) {
-                    pdf_obj *obj = pdf_annot_obj(ctx, annot);
-                    pdf_obj *rect_arr = pdf_new_array(ctx, doc, 4);
-                    for (int k = 0; k < 4; ++k) {
-                        pdf_array_push_real(ctx, rect_arr, (float)fz_json_to_number(ctx, fz_json_array_get(ctx, r_arr, k)));
-                    }
-                    pdf_dict_puts_drop(ctx, obj, "Rect", rect_arr);
+                if (r_arr && fz_json_is_array(ctx, r_arr) && fz_json_array_length(ctx, r_arr) == 4) {
+                    fz_rect pdf_rect = {
+                        (float)fz_json_to_number(ctx, fz_json_array_get(ctx, r_arr, 0)),
+                        (float)fz_json_to_number(ctx, fz_json_array_get(ctx, r_arr, 1)),
+                        (float)fz_json_to_number(ctx, fz_json_array_get(ctx, r_arr, 2)),
+                        (float)fz_json_to_number(ctx, fz_json_array_get(ctx, r_arr, 3))
+                    };
+                    fz_rect mbox;
+                    fz_matrix ctm;
+                    pdf_page_transform(ctx, page, &mbox, &ctm);
 
-                    const char *ts = fz_json_to_string(ctx, fz_json_object_get(ctx, op, "timestamp"));
+                    const char *ts = json_optional_string(ctx, fz_json_object_get(ctx, op, "timestamp"));
                     int64_t t = parse_iso_or_pdf_date(ts);
                     if (t > 0) pdf_set_annot_modification_date(ctx, annot, t);
 
                     if (pdf_annot_type(ctx, annot) == PDF_ANNOT_CARET) {
-                        pdf_dict_dels(ctx, obj, "AP");
-                        pdf_dict_dels(ctx, obj, "CA");
+                        pdf_set_annot_rect(ctx, annot, fz_transform_rect(pdf_rect, ctm));
+                    } else {
+                        float existing_opacity = pdf_annot_opacity(ctx, annot);
+                        pdf_set_annot_rect(ctx, annot, fz_transform_rect(pdf_rect, ctm));
+                        finish_appearance(ctx, annot, existing_opacity > 0 ? existing_opacity : 1.0f);
                     }
                 }
                 fz_drop_page(ctx, &page->super);
+                page = NULL;
             } else if (strcmp(op_name, "update") == 0) {
-                const char *source_id = fz_json_to_string(ctx, fz_json_object_get(ctx, op, "sourceID"));
-                pdf_page *page = NULL;
-                pdf_annot *annot = find_annot_by_source_id(ctx, doc, source_id, &page);
+                const char *source_id = json_optional_string(ctx, fz_json_object_get(ctx, op, "sourceID"));
+                pdf_page *found_page = NULL;
+                pdf_annot *annot = find_annot_by_source_id(ctx, doc, source_id, &found_page);
+                page = found_page;
                 if (!annot || !page) {
                     char err_buf[128];
                     snprintf(err_buf, sizeof(err_buf), "annotation object %s was not found", source_id ? source_id : "null");
                     fz_throw(ctx, FZ_ERROR_GENERIC, "%s", err_buf);
                 }
                 pdf_obj *obj = pdf_annot_obj(ctx, annot);
-                pdf_obj *preserved_rect = NULL;
-                if (pdf_annot_type(ctx, annot) == PDF_ANNOT_CARET) {
+                bool is_caret = (pdf_annot_type(ctx, annot) == PDF_ANNOT_CARET);
+                if (is_caret) {
                     pdf_obj *r = pdf_dict_get(ctx, obj, PDF_NAME(Rect));
                     if (r) preserved_rect = pdf_keep_obj(ctx, r);
                 }
 
-                const char *contents = fz_json_to_string(ctx, fz_json_object_get(ctx, op, "contents"));
+                const char *contents = json_optional_string(ctx, fz_json_object_get(ctx, op, "contents"));
                 if (contents) pdf_set_annot_contents(ctx, annot, contents);
 
-                const char *author = fz_json_to_string(ctx, fz_json_object_get(ctx, op, "author"));
+                const char *author = json_optional_string(ctx, fz_json_object_get(ctx, op, "author"));
                 if (author) pdf_set_annot_author(ctx, annot, author);
 
-                const char *timestamp = fz_json_to_string(ctx, fz_json_object_get(ctx, op, "timestamp"));
+                const char *timestamp = json_optional_string(ctx, fz_json_object_get(ctx, op, "timestamp"));
                 if (timestamp) {
                     int64_t t = parse_iso_or_pdf_date(timestamp);
                     if (t > 0) pdf_set_annot_modification_date(ctx, annot, t);
                 }
 
                 float opacity = (float)fz_json_to_number(ctx, fz_json_object_get(ctx, op, "opacity"));
-                if (opacity > 0) pdf_set_annot_opacity(ctx, annot, opacity);
+                if (opacity <= 0) opacity = pdf_annot_opacity(ctx, annot);
+                if (opacity <= 0) opacity = 1.0f;
+                pdf_set_annot_opacity(ctx, annot, opacity);
 
+                float color[4] = {0.972549f, 0.392151f, 0.392151f, 1.0f};
+                int ncolor = 0;
+                pdf_annot_color(ctx, annot, &ncolor, color);
                 fz_json *c_arr = fz_json_object_get(ctx, op, "color");
-                if (c_arr && fz_json_array_length(ctx, c_arr) == 3) {
-                    float color[3] = {
-                        (float)fz_json_to_number(ctx, fz_json_array_get(ctx, c_arr, 0)),
-                        (float)fz_json_to_number(ctx, fz_json_array_get(ctx, c_arr, 1)),
-                        (float)fz_json_to_number(ctx, fz_json_array_get(ctx, c_arr, 2))
-                    };
+                if (c_arr && fz_json_is_array(ctx, c_arr) && fz_json_array_length(ctx, c_arr) == 3) {
+                    color[0] = (float)fz_json_to_number(ctx, fz_json_array_get(ctx, c_arr, 0));
+                    color[1] = (float)fz_json_to_number(ctx, fz_json_array_get(ctx, c_arr, 1));
+                    color[2] = (float)fz_json_to_number(ctx, fz_json_array_get(ctx, c_arr, 2));
                     pdf_set_annot_color(ctx, annot, 3, color);
                 }
-                finish_appearance(ctx, annot, opacity > 0 ? opacity : 1.0f);
+                finish_appearance(ctx, annot, opacity);
 
-                if (preserved_rect) {
-                    pdf_dict_puts_drop(ctx, obj, "Rect", preserved_rect);
-                    pdf_dict_dels(ctx, obj, "AP");
-                    pdf_dict_dels(ctx, obj, "CA");
+                if (is_caret) {
+                    if (preserved_rect) {
+                        pdf_dict_puts_drop(ctx, obj, "Rect", preserved_rect);
+                        preserved_rect = NULL;
+                    }
+                    write_caret_appearance_stream(ctx, doc, obj, color, opacity);
                 }
 
                 fz_drop_page(ctx, &page->super);
+                page = NULL;
             } else if (strcmp(op_name, "delete") == 0) {
-                const char *source_id = fz_json_to_string(ctx, fz_json_object_get(ctx, op, "sourceID"));
-                pdf_page *page = NULL;
-                pdf_annot *annot = find_annot_by_source_id(ctx, doc, source_id, &page);
+                const char *source_id = json_optional_string(ctx, fz_json_object_get(ctx, op, "sourceID"));
+                pdf_page *found_page = NULL;
+                pdf_annot *annot = find_annot_by_source_id(ctx, doc, source_id, &found_page);
+                page = found_page;
                 if (!annot || !page) {
                     char err_buf[128];
                     snprintf(err_buf, sizeof(err_buf), "annotation object %s was not found", source_id ? source_id : "null");
@@ -641,6 +864,7 @@ bool mupdf_bridge_write_annotations(const char *input_path, const char *output_p
                 }
                 pdf_delete_annot(ctx, page, annot);
                 fz_drop_page(ctx, &page->super);
+                page = NULL;
             }
         }
 
@@ -654,9 +878,14 @@ bool mupdf_bridge_write_annotations(const char *input_path, const char *output_p
         success = false;
     }
 
-    fz_drop_pool(ctx, pool);
+    if (preserved_rect) pdf_drop_obj(ctx, preserved_rect);
+    if (mupdf_quads) free(mupdf_quads);
+    if (created_annot) pdf_drop_annot(ctx, created_annot);
+    if (page) fz_drop_page(ctx, &page->super);
+    if (pool) fz_drop_pool(ctx, pool);
     if (doc) pdf_drop_document(ctx, doc);
     fz_drop_context(ctx);
+    free(normalized_json);
     return success;
 }
 
@@ -667,20 +896,34 @@ bool mupdf_bridge_update_statuses(const char *input_path, const char *output_pat
     }
     if (out_error) *out_error = NULL;
 
+    char *normalized_json = normalize_json_for_mupdf(statuses_json);
+    if (!normalized_json) {
+        set_error(out_error, "Out of memory normalizing statuses JSON");
+        return false;
+    }
+
     fz_context *ctx = fz_new_context(NULL, NULL, FZ_STORE_UNLIMITED);
     if (!ctx) {
+        free(normalized_json);
         set_error(out_error, "Failed to create MuPDF context");
         return false;
     }
-    fz_register_document_handlers(ctx);
 
     bool success = false;
     pdf_document *doc = NULL;
-    fz_pool *pool = fz_new_pool(ctx);
+    fz_pool *pool = NULL;
+    pdf_page *page = NULL;
+
+    fz_var(success);
+    fz_var(doc);
+    fz_var(pool);
+    fz_var(page);
 
     fz_try(ctx) {
+        fz_register_document_handlers(ctx);
+        pool = fz_new_pool(ctx);
         doc = pdf_open_document(ctx, input_path);
-        fz_json *root = fz_parse_json(ctx, pool, statuses_json);
+        fz_json *root = fz_parse_json(ctx, pool, normalized_json);
         if (!root) fz_throw(ctx, FZ_ERROR_GENERIC, "Failed to parse statuses JSON");
 
         fz_json *updates_arr = fz_json_object_get(ctx, root, "updates");
@@ -692,15 +935,17 @@ bool mupdf_bridge_update_statuses(const char *input_path, const char *output_pat
         int count = fz_json_array_length(ctx, updates_arr);
         for (int i = 0; i < count; ++i) {
             fz_json *item = fz_json_array_get(ctx, updates_arr, i);
-            const char *source_id = fz_json_to_string(ctx, fz_json_object_get(ctx, item, "sourceID"));
-            const char *state_model = fz_json_to_string(ctx, fz_json_object_get(ctx, item, "stateModel"));
-            const char *state = fz_json_to_string(ctx, fz_json_object_get(ctx, item, "state"));
-            if (!state) state = fz_json_to_string(ctx, fz_json_object_get(ctx, item, "status"));
-            if (!state_model) state_model = "Review";
-            if (!source_id || !state) continue;
+            if (!item) continue;
+            const char *source_id = json_optional_string(ctx, fz_json_object_get(ctx, item, "sourceID"));
+            const char *state_model = json_optional_string(ctx, fz_json_object_get(ctx, item, "stateModel"));
+            const char *state = json_optional_string(ctx, fz_json_object_get(ctx, item, "state"));
+            if (!state || !*state) state = json_optional_string(ctx, fz_json_object_get(ctx, item, "status"));
+            if (!state_model || !*state_model) state_model = "Review";
+            if (!source_id || !*source_id || !state || !*state) continue;
 
-            pdf_page *page = NULL;
-            pdf_annot *target_annot = find_annot_by_source_id(ctx, doc, source_id, &page);
+            pdf_page *found_page = NULL;
+            pdf_annot *target_annot = find_annot_by_source_id(ctx, doc, source_id, &found_page);
+            page = found_page;
             if (!target_annot || !page) {
                 char err_buf[128];
                 snprintf(err_buf, sizeof(err_buf), "annotation object %s was not found", source_id);
@@ -711,6 +956,7 @@ bool mupdf_bridge_update_statuses(const char *input_path, const char *output_pat
             pdf_dict_puts_drop(ctx, target_obj, "StateModel", pdf_new_name(ctx, state_model));
             pdf_dict_puts_drop(ctx, target_obj, "State", pdf_new_name(ctx, state));
             fz_drop_page(ctx, &page->super);
+            page = NULL;
         }
 
         pdf_write_options opts = pdf_default_write_options;
@@ -723,9 +969,11 @@ bool mupdf_bridge_update_statuses(const char *input_path, const char *output_pat
         success = false;
     }
 
-    fz_drop_pool(ctx, pool);
+    if (page) fz_drop_page(ctx, &page->super);
+    if (pool) fz_drop_pool(ctx, pool);
     if (doc) pdf_drop_document(ctx, doc);
     fz_drop_context(ctx);
+    free(normalized_json);
     return success;
 }
 
@@ -741,16 +989,21 @@ bool mupdf_bridge_strip_annotations(const char *input_path, const char *output_p
         set_error(out_error, "Failed to create MuPDF context");
         return false;
     }
-    fz_register_document_handlers(ctx);
 
     bool success = false;
     pdf_document *doc = NULL;
+    pdf_page *page = NULL;
+
+    fz_var(success);
+    fz_var(doc);
+    fz_var(page);
 
     fz_try(ctx) {
+        fz_register_document_handlers(ctx);
         doc = pdf_open_document(ctx, input_path);
         int page_count = pdf_count_pages(ctx, doc);
         for (int p = 0; p < page_count; ++p) {
-            pdf_page *page = pdf_load_page(ctx, doc, p);
+            page = pdf_load_page(ctx, doc, p);
             pdf_annot *annot = pdf_first_annot(ctx, page);
             while (annot) {
                 pdf_annot *next = pdf_next_annot(ctx, annot);
@@ -758,6 +1011,7 @@ bool mupdf_bridge_strip_annotations(const char *input_path, const char *output_p
                 annot = next;
             }
             fz_drop_page(ctx, &page->super);
+            page = NULL;
         }
 
         pdf_write_options opts = pdf_default_write_options;
@@ -770,6 +1024,7 @@ bool mupdf_bridge_strip_annotations(const char *input_path, const char *output_p
         success = false;
     }
 
+    if (page) fz_drop_page(ctx, &page->super);
     if (doc) pdf_drop_document(ctx, doc);
     fz_drop_context(ctx);
     return success;

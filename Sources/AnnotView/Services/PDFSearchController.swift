@@ -54,6 +54,6 @@ final class PDFSearchController: ObservableObject {
             return nil
         }
         navigationID += 1
-        return results[currentResultIndex].pages.first.map(document.index(for:))
+        return results[currentResultIndex].pages.first.flatMap(document.validPageIndex(for:))
     }
 }
