@@ -19,9 +19,6 @@ if [[ "${1:-}" == "--stage" ]]; then STAGE_ONLY=1; fi
 STAGING="$ROOT/dist/$APP_NAME.app"
 DEST="/Applications/$APP_NAME.app"
 
-echo "==> Preparing minimal MuPDF build (headers + lib for linking)"
-"$ROOT/Scripts/build-mupdf.sh"
-
 echo "==> Building release binary"
 swift build -c release --product "$APP_NAME"
 
@@ -45,31 +42,10 @@ if [[ -d "$BIN_DIR/Sparkle.framework" ]]; then
   cp -R "$BIN_DIR/Sparkle.framework" "$STAGING/Contents/Frameworks/Sparkle.framework"
 fi
 
-# Bundle the minimal source-built MuPDF library (Scripts/build-mupdf.sh): a
-# single libmupdf.dylib that depends only on libSystem. No Homebrew dylibs
-# are needed at runtime.
-MUPDF_DIST="$ROOT/.build/mupdf-dist"
-MUPDF_DYLIB="$MUPDF_DIST/lib/libmupdf.dylib"
-if [[ ! -f "$MUPDF_DYLIB" ]]; then
-  echo "ERROR: build-mupdf.sh did not produce $MUPDF_DIST artifacts" >&2
-  exit 1
-fi
-
-echo "==> Bundling libmupdf.dylib"
-FRAMEWORKS="$STAGING/Contents/Frameworks"
-cp "$MUPDF_DYLIB" "$FRAMEWORKS/libmupdf.dylib"
-# The staged artifact already carries an @rpath install name from
-# build-mupdf.sh; nothing to rewrite here.
-
-echo "    bundled libmupdf.dylib"
-
 echo "==> Signing (ad hoc)"
 if [[ -d "$STAGING/Contents/Frameworks/Sparkle.framework" ]]; then
   codesign --force --sign - --timestamp=none "$STAGING/Contents/Frameworks/Sparkle.framework"
 fi
-for binary in "$FRAMEWORKS"/*.dylib; do
-  codesign --force --sign - --timestamp=none "$binary"
-done
 codesign --force --sign - --timestamp=none "$STAGING"
 
 if [[ "$STAGE_ONLY" -eq 1 ]]; then

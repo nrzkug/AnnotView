@@ -75,7 +75,7 @@ struct AnnotationCreationTests {
             ISO8601DateFormatter().date(from: "2026-08-09T15:20:00Z")
         )
 
-        let writer = MuPDFAnnotationWriter()
+        let writer = SwiftPDFAnnotationWriter()
         try await writer.createMarkup(
             in: documentURL,
             kind: .highlight,
@@ -87,7 +87,7 @@ struct AnnotationCreationTests {
         )
 
         let annotation = try #require(
-            try await MuPDFAnnotationParser().annotations(in: documentURL).first
+            try await SwiftPDFAnnotationParser().annotations(in: documentURL).first
         )
         #expect(annotation.sourceID != nil)
         #expect(annotation.kind == .highlight)
@@ -111,7 +111,7 @@ struct AnnotationCreationTests {
             modifiedAt: createdAt.addingTimeInterval(60)
         )
         let updated = try #require(
-            try await MuPDFAnnotationParser().annotations(in: documentURL).first
+            try await SwiftPDFAnnotationParser().annotations(in: documentURL).first
         )
         #expect(updated.sourceID == sourceID)
         #expect(updated.contents == "Updated review comment")
@@ -119,7 +119,7 @@ struct AnnotationCreationTests {
         #expect(abs(updated.color.green - Annotation.Color.green.green) < 0.0001)
 
         try await writer.delete(in: documentURL, sourceID: sourceID)
-        #expect(try await MuPDFAnnotationParser().annotations(in: documentURL).isEmpty)
+        #expect(try await SwiftPDFAnnotationParser().annotations(in: documentURL).isEmpty)
     }
 
     @Test @MainActor
@@ -139,7 +139,7 @@ struct AnnotationCreationTests {
         document.insert(try #require(PDFPage(image: image)), at: 0)
         #expect(document.write(to: documentURL))
 
-        let writer = MuPDFAnnotationWriter()
+        let writer = SwiftPDFAnnotationWriter()
         let quad = PDFMarkupQuad(
             topLeft: CGPoint(x: 72, y: 700), topRight: CGPoint(x: 260, y: 700),
             bottomLeft: CGPoint(x: 72, y: 682), bottomRight: CGPoint(x: 260, y: 682)
@@ -172,7 +172,7 @@ struct AnnotationCreationTests {
             in: documentURL
         )
 
-        let annotations = try await MuPDFAnnotationParser().annotations(in: documentURL)
+        let annotations = try await SwiftPDFAnnotationParser().annotations(in: documentURL)
         #expect(annotations.count == 4)
         #expect(annotations.contains { $0.kind == .underline && $0.contents == "Underline" })
         #expect(annotations.contains { $0.kind == .strikeout && $0.contents == "Strikeout" })
@@ -192,7 +192,7 @@ struct AnnotationCreationTests {
 
         let documentURL = directory.appendingPathComponent("batch-status.pdf")
         try writeBlankPDF(to: documentURL)
-        let writer = MuPDFAnnotationWriter()
+        let writer = SwiftPDFAnnotationWriter()
         for x in [120.0, 220.0] {
             try await writer.createNote(
                 in: documentURL,
@@ -204,7 +204,7 @@ struct AnnotationCreationTests {
             )
         }
 
-        let parser = MuPDFAnnotationParser()
+        let parser = SwiftPDFAnnotationParser()
         let annotations = try await parser.annotations(in: documentURL)
         #expect(annotations.count == 2)
         let updates = try annotations.map {
@@ -213,7 +213,7 @@ struct AnnotationCreationTests {
                 status: .completed
             )
         }
-        try await MuPDFAnnotationStatusWriter().updateStatuses(
+        try await SwiftPDFAnnotationStatusWriter().updateStatuses(
             in: documentURL,
             updates: updates
         )
@@ -232,7 +232,7 @@ struct AnnotationCreationTests {
 
         let documentURL = directory.appendingPathComponent("atomic.pdf")
         try writeBlankPDF(to: documentURL)
-        let writer = MuPDFAnnotationWriter()
+        let writer = SwiftPDFAnnotationWriter()
         var didFail = false
         do {
             try await writer.perform(
@@ -251,7 +251,7 @@ struct AnnotationCreationTests {
         }
 
         #expect(didFail)
-        #expect(try await MuPDFAnnotationParser().annotations(in: documentURL).isEmpty)
+        #expect(try await SwiftPDFAnnotationParser().annotations(in: documentURL).isEmpty)
     }
 
     @Test @MainActor
@@ -594,8 +594,8 @@ struct AnnotationCreationTests {
         document.insert(try #require(PDFPage(image: image)), at: 0)
         #expect(document.write(to: documentURL))
 
-        let writer = MuPDFAnnotationWriter()
-        let parser = MuPDFAnnotationParser()
+        let writer = SwiftPDFAnnotationWriter()
+        let parser = SwiftPDFAnnotationParser()
 
         try await writer.createNote(
             in: documentURL,

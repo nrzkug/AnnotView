@@ -514,74 +514,118 @@ private struct EmptyDocumentBuilder: PDFDocumentBuilding {
     }
 }
 
-struct MuPDFAnnotationParserTests {
-    @Test func decodesRotatedCropBoxCoordinates() throws {
-        let json = #"""
-        {
-          "version": 1,
-          "pages": [{
-            "pageIndex": 0,
-            "pageTransform": [0, 1, 1, 0, 10, 20],
-            "annotations": [{
-              "sourceID": "rotated", "inReplyToSourceID": null,
-              "type": "Highlight", "bounds": [2, 3, 8, 9],
-              "quadPoints": [[2, 3, 8, 3, 2, 9, 8, 9]],
-              "contents": null, "author": null, "subject": null,
-              "creationDate": null, "modificationDate": null,
-              "color": [1, 1, 0], "opacity": 0.4,
-              "stateModel": null, "state": null
-            }]
-          }]
+struct SwiftPDFAnnotationParserTests {
+    private static func makeMinimalPDF(
+        pageDictExtras: [String: PDFObject] = [:],
+        annots: [(Int, [String: PDFObject])]
+    ) -> Data {
+        var pdf = Data("%PDF-1.4\n".utf8)
+        var offsets: [Int: Int] = [:]
+        func appendObj(_ num: Int, _ obj: PDFObject) {
+            offsets[num] = pdf.count
+            pdf.append(PDFSerializer.serializeIndirectObject(objNum: num, genNum: 0, object: obj))
         }
-        """#
+        appendObj(1, .dict(["Type": .name("Catalog"), "Pages": .indirectRef(objNum: 2, genNum: 0)]))
+        appendObj(2, .dict([
+            "Type": .name("Pages"),
+            "Kids": .array([.indirectRef(objNum: 3, genNum: 0)]),
+            "Count": .int(1)
+        ]))
+        var pageDict: [String: PDFObject] = [
+            "Type": .name("Page"),
+            "Parent": .indirectRef(objNum: 2, genNum: 0),
+            "MediaBox": .array([.int(0), .int(0), .int(612), .int(792)]),
+            "Annots": .array(annots.map { .indirectRef(objNum: $0.0, genNum: 0) })
+        ]
+        for (k, v) in pageDictExtras { pageDict[k] = v }
+        appendObj(3, .dict(pageDict))
+        for (num, dict) in annots {
+            appendObj(num, .dict(dict))
+        }
+        let maxObj = max(3, annots.map(\.0).max() ?? 3)
+        let xrefOffset = pdf.count
+        pdf.append(Data("xref\n0 \(maxObj + 1)\n0000000000 65535 f \n".utf8))
+        for i in 1...maxObj {
+            if let off = offsets[i] {
+                pdf.append(Data(String(format: "%010d 00000 n \n", off).utf8))
+            } else {
+                pdf.append(Data("0000000000 65535 f \n".utf8))
+            }
+        }
+        pdf.append(Data("trailer\n<< /Size \(maxObj + 1) /Root 1 0 R >>\nstartxref\n\(xrefOffset)\n%%EOF\n".utf8))
+        return pdf
+    }
+
+    @Test func decodesRotatedCropBoxCoordinates() throws {
+        let pdfData = Self.makeMinimalPDF(
+            pageDictExtras: [
+                "Rotate": .int(90),
+                "CropBox": .array([.int(10), .int(20), .int(500), .int(700)])
+            ],
+            annots: [
+                (10, [
+                    "Type": .name("Annot"),
+                    "Subtype": .name("Highlight"),
+                    "Rect": .array([.int(13), .int(22), .int(19), .int(28)]),
+                    "QuadPoints": .array([
+                        .int(13), .int(28), .int(19), .int(28),
+                        .int(13), .int(22), .int(19), .int(22)
+                    ]),
+                    "C": .array([.int(1), .int(1), .int(0)]),
+                    "CA": .real(0.4)
+                ])
+            ]
+        )
 
         let annotation = try #require(
-            MuPDFAnnotationParser.decode(Data(json.utf8)).first
+            try SwiftPDFAnnotationParser().annotations(in: pdfData).first
         )
-        #expect(annotation.quadPoints[0] == CGPoint(x: 13, y: 22))
-        #expect(annotation.quadPoints[3] == CGPoint(x: 19, y: 28))
+        #expect(annotation.quadPoints[0] == CGPoint(x: 13, y: 28))
+        #expect(annotation.quadPoints[3] == CGPoint(x: 19, y: 22))
         #expect(annotation.bounds == CGRect(x: 13, y: 22, width: 6, height: 6))
+        #expect(abs(annotation.color.alpha - 0.4) < 0.001)
     }
 
     @Test func decodesCoordinatesColorsAndReplyRelationships() throws {
-        let json = #"""
-        {
-          "version": 1,
-          "pages": [{
-            "pageIndex": 0,
-            "pageTransform": [1, 0, 0, -1, 0, 100],
-            "annotations": [
-              {
-                "sourceID": "10", "inReplyToSourceID": null,
-                "type": "Underline", "bounds": [10, 20, 30, 30],
-                "quadPoints": [[10, 20, 30, 20, 10, 30, 30, 30]],
-                "contents": null, "author": "Reviewer", "subject": "Underline",
-                "creationDate": "2026-07-28T03:44:44.000Z", "modificationDate": null,
-                "color": [0.1, 0.2, 0.3], "opacity": 0.5,
-                "stateModel": "Review", "state": "Accepted"
-              },
-              {
-                "sourceID": "20", "inReplyToSourceID": null,
-                "type": "Text", "bounds": [40, 40, 60, 60], "quadPoints": [],
-                "contents": "Root", "author": "Reviewer", "subject": "Note",
-                "creationDate": null, "modificationDate": null,
-                "color": [1, 1, 0], "opacity": 1,
-                "stateModel": null, "state": null
-              },
-              {
-                "sourceID": "21", "inReplyToSourceID": "20",
-                "type": "Text", "bounds": [40, 40, 60, 60], "quadPoints": [],
-                "contents": "Reply", "author": "Author", "subject": "Reply",
-                "creationDate": null, "modificationDate": null,
-                "color": [1, 1, 0], "opacity": 1,
-                "stateModel": "Review", "state": "Completed"
-              }
-            ]
-          }]
-        }
-        """#
+        let pdfData = Self.makeMinimalPDF(annots: [
+            (10, [
+                "Type": .name("Annot"),
+                "Subtype": .name("Underline"),
+                "Rect": .array([.int(10), .int(70), .int(30), .int(80)]),
+                "QuadPoints": .array([
+                    .int(10), .int(80), .int(30), .int(80),
+                    .int(10), .int(70), .int(30), .int(70)
+                ]),
+                "T": .string(PDFTextString.encode("Reviewer")),
+                "Subj": .string(PDFTextString.encode("Underline")),
+                "CreationDate": .string(PDFTextString.encode("D:20260728034444Z")),
+                "C": .array([.real(0.1), .real(0.2), .real(0.3)]),
+                "CA": .real(0.5),
+                "StateModel": .name("Review"),
+                "State": .name("Accepted")
+            ]),
+            (20, [
+                "Type": .name("Annot"),
+                "Subtype": .name("Text"),
+                "Rect": .array([.int(40), .int(40), .int(60), .int(60)]),
+                "Contents": .string(PDFTextString.encode("Root")),
+                "T": .string(PDFTextString.encode("Reviewer")),
+                "C": .array([.int(1), .int(1), .int(0)])
+            ]),
+            (21, [
+                "Type": .name("Annot"),
+                "Subtype": .name("Text"),
+                "IRT": .indirectRef(objNum: 20, genNum: 0),
+                "Rect": .array([.int(40), .int(40), .int(60), .int(60)]),
+                "Contents": .string(PDFTextString.encode("Reply")),
+                "T": .string(PDFTextString.encode("Author")),
+                "C": .array([.int(1), .int(1), .int(0)]),
+                "StateModel": .name("Review"),
+                "State": .name("Completed")
+            ])
+        ])
 
-        let annotations = try MuPDFAnnotationParser.decode(Data(json.utf8))
+        let annotations = try SwiftPDFAnnotationParser().annotations(in: pdfData)
         let underline = try #require(annotations.first { $0.kind == .underline })
         let reply = try #require(annotations.first { $0.contents == "Reply" })
 
@@ -591,75 +635,62 @@ struct MuPDFAnnotationParserTests {
         #expect(abs(underline.color.alpha - 0.5) < 0.001)
         #expect(underline.createdDate != nil)
         #expect(underline.status == .accepted)
-        #expect(underline.statusTargetSourceID == "10")
-        #expect(reply.inReplyToSourceID == "20")
+        #expect(underline.statusTargetSourceID == "10 0 R")
+        #expect(reply.inReplyToSourceID == "20 0 R")
         #expect(reply.status == .completed)
     }
 
     @Test func decodesStandaloneCaretAnnotations() throws {
-        let json = #"""
-        {
-          "version": 1,
-          "pages": [{
-            "pageIndex": 0,
-            "pageTransform": [1, 0, 0, -1, 0, 100],
-            "annotations": [{
-              "sourceID": "caret1", "inReplyToSourceID": null,
-              "type": "Caret", "bounds": [472, 722, 481, 729], "quadPoints": [],
-              "contents": "We note that Fashion-MNIST and CIFAR-10 are two of the most popular datasets in the federated learning literature [refs].",
-              "author": "rjin", "subject": "InsertedText",
-              "creationDate": null, "modificationDate": null,
-              "color": [0.75, 0.22, 0.77], "opacity": 1,
-              "stateModel": null, "state": null
-            }]
-          }]
-        }
-        """#
+        let pdfData = Self.makeMinimalPDF(annots: [
+            (10, [
+                "Type": .name("Annot"),
+                "Subtype": .name("Caret"),
+                "Rect": .array([.int(472), .int(722), .int(481), .int(729)]),
+                "Contents": .string(PDFTextString.encode("We note that Fashion-MNIST and CIFAR-10 are two of the most popular datasets in the federated learning literature [refs].")),
+                "T": .string(PDFTextString.encode("rjin")),
+                "Subj": .string(PDFTextString.encode("InsertedText")),
+                "C": .array([.real(0.75), .real(0.22), .real(0.77)])
+            ])
+        ])
 
         let annotation = try #require(
-            MuPDFAnnotationParser.decode(Data(json.utf8)).first
+            try SwiftPDFAnnotationParser().annotations(in: pdfData).first
         )
         #expect(annotation.kind == .caret)
         #expect(annotation.contents?.hasPrefix("We note that Fashion-MNIST") == true)
-        #expect(annotation.bounds == CGRect(x: 472, y: -629, width: 9, height: 7))
+        #expect(annotation.bounds == CGRect(x: 472, y: 722, width: 9, height: 7))
     }
 
     @Test func hidesCaretParentsAlreadyMergedIntoTheirStrikeOutChild() throws {
-        let json = #"""
-        {
-          "version": 1,
-          "pages": [{
-            "pageIndex": 0,
-            "pageTransform": [1, 0, 0, -1, 0, 100],
-            "annotations": [
-              {
-                "sourceID": "caret", "inReplyToSourceID": null,
-                "type": "Caret", "bounds": [10, 20, 20, 30], "quadPoints": [],
-                "contents": "bound specified", "author": "rjin", "subject": "InsertedText",
-                "creationDate": null, "modificationDate": null,
-                "color": [0.97, 0.39, 0.39], "opacity": 1,
-                "stateModel": null, "state": null
-              },
-              {
-                "sourceID": "strike", "inReplyToSourceID": "caret",
-                "type": "StrikeOut", "bounds": [10, 20, 30, 30],
-                "quadPoints": [[10, 20, 30, 20, 10, 30, 30, 30]],
-                "contents": null, "author": "rjin", "subject": "Replace",
-                "creationDate": null, "modificationDate": null,
-                "color": [0.9, 0.15, 0.12], "opacity": 1,
-                "stateModel": null, "state": null
-              }
-            ]
-          }]
-        }
-        """#
+        let pdfData = Self.makeMinimalPDF(annots: [
+            (10, [
+                "Type": .name("Annot"),
+                "Subtype": .name("Caret"),
+                "Rect": .array([.int(10), .int(20), .int(20), .int(30)]),
+                "Contents": .string(PDFTextString.encode("bound specified")),
+                "T": .string(PDFTextString.encode("rjin")),
+                "C": .array([.real(0.97), .real(0.39), .real(0.39)])
+            ]),
+            (11, [
+                "Type": .name("Annot"),
+                "Subtype": .name("StrikeOut"),
+                "IRT": .indirectRef(objNum: 10, genNum: 0),
+                "Rect": .array([.int(10), .int(20), .int(30), .int(30)]),
+                "QuadPoints": .array([
+                    .int(10), .int(30), .int(30), .int(30),
+                    .int(10), .int(20), .int(30), .int(20)
+                ]),
+                "T": .string(PDFTextString.encode("rjin")),
+                "C": .array([.real(0.9), .real(0.15), .real(0.12)])
+            ])
+        ])
 
-        let annotations = try MuPDFAnnotationParser.decode(Data(json.utf8))
+        let annotations = try SwiftPDFAnnotationParser().annotations(in: pdfData)
         #expect(annotations.count == 1)
         let merged = try #require(annotations.first)
         #expect(merged.kind == .strikeout)
         #expect(merged.contents == "bound specified")
-        #expect(merged.statusTargetSourceID == "caret")
+        #expect(merged.statusTargetSourceID == "10 0 R")
     }
 
     @Test func groupsTextRepliesUnderTheirParent() {
@@ -694,12 +725,12 @@ struct MuPDFAnnotationParserTests {
 
         let copyURL = temporaryDirectory.appendingPathComponent("review-copy.pdf")
         try fileManager.copyItem(at: URL(fileURLWithPath: path), to: copyURL)
-        let parser = MuPDFAnnotationParser()
+        let parser = SwiftPDFAnnotationParser()
         let before = try await parser.annotations(in: copyURL)
         let target = try #require(before.first { $0.kind == .strikeout })
         let targetID = try #require(target.statusTargetSourceID)
 
-        let writer = MuPDFAnnotationStatusWriter()
+        let writer = SwiftPDFAnnotationStatusWriter()
         try await writer.updateStatus(in: copyURL, sourceID: targetID, status: .accepted)
 
         let after = try await parser.annotations(in: copyURL)

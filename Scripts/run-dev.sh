@@ -45,12 +45,6 @@ if [[ -z "$PDF" && -f "$DEFAULT_PDF" ]]; then
   PDF="$DEFAULT_PDF"
 fi
 
-MUPDF_DYLIB="$ROOT/.build/mupdf-dist/lib/libmupdf.dylib"
-if [[ ! -f "$MUPDF_DYLIB" ]]; then
-  echo "==> Staging minimal MuPDF (first run only)"
-  "$ROOT/Scripts/build-mupdf.sh"
-fi
-
 APP="$ROOT/dist-dev/$APP_NAME.app"
 
 if [[ "$BUILD" -eq 1 ]]; then
@@ -80,15 +74,11 @@ if [[ "$BUILD" -eq 1 ]]; then
   if [[ -d "$BIN_DIR/Sparkle.framework" ]]; then
     cp -R "$BIN_DIR/Sparkle.framework" "$APP/Contents/Frameworks/Sparkle.framework"
   fi
-  cp "$MUPDF_DYLIB" "$APP/Contents/Frameworks/libmupdf.dylib"
 
   echo "==> Signing (ad hoc)"
   if [[ -d "$APP/Contents/Frameworks/Sparkle.framework" ]]; then
     codesign --force --sign - --timestamp=none "$APP/Contents/Frameworks/Sparkle.framework"
   fi
-  for binary in "$APP/Contents/Frameworks"/*.dylib; do
-    codesign --force --sign - --timestamp=none "$binary"
-  done
   codesign --force --sign - --timestamp=none "$APP"
 fi
 

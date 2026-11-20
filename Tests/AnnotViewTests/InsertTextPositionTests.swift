@@ -25,7 +25,7 @@ struct InsertTextPositionTests {
         }
         #expect(document.write(to: url))
         let points = [CGPoint(x: 120, y: 680), CGPoint(x: 350, y: 150)]
-        let writer = MuPDFAnnotationWriter()
+        let writer = SwiftPDFAnnotationWriter()
         for pageIndex in 0..<4 {
             for point in points {
                 try await writer.createCaret(
@@ -34,7 +34,7 @@ struct InsertTextPositionTests {
                 )
             }
         }
-        let annotations = try await MuPDFAnnotationParser().annotations(in: url)
+        let annotations = try await SwiftPDFAnnotationParser().annotations(in: url)
         let reopened = try #require(PDFDocument(url: url))
         for pageIndex in 0..<4 {
             for point in points {

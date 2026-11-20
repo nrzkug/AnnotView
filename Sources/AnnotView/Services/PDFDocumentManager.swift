@@ -128,11 +128,11 @@ final class PDFDocumentManager: ObservableObject {
     private let renderedPageCache = NSCache<NSString, NSImage>()
 
     init(
-        annotationParser: any AnnotationParsing = MuPDFAnnotationParser(),
-        annotationStatusUpdater: any AnnotationStatusUpdating = MuPDFAnnotationStatusWriter(),
-        annotationWriter: any AnnotationWriting = MuPDFAnnotationWriter(),
+        annotationParser: any AnnotationParsing = SwiftPDFAnnotationParser(),
+        annotationStatusUpdater: any AnnotationStatusUpdating = SwiftPDFAnnotationStatusWriter(),
+        annotationWriter: any AnnotationWriting = SwiftPDFAnnotationWriter(),
         colorMemory: AnnotationColorMemory = .shared,
-        displayDocumentPreparer: any PDFDisplayDocumentPreparing = MuPDFDisplayDocumentPreparer(),
+        displayDocumentPreparer: any PDFDisplayDocumentPreparing = SwiftPDFDisplayDocumentPreparer(),
         recentDocumentStore: any RecentDocumentStoring = UserDefaultsRecentDocumentStore(),
         documentPicker: any PDFDocumentPicking = AppKitPDFDocumentPicker(),
         documentBuilder: any PDFDocumentBuilding = PDFKitDocumentBuilder(),
@@ -175,7 +175,7 @@ final class PDFDocumentManager: ObservableObject {
         let loadedDocument: LoadedPDFDocument?
         // Fast path: Build directly from URL with in-memory non-link annotation stripping.
         // Bypasses subprocess invocation and disk re-compression, opening PDFs in milliseconds.
-        if displayDocumentPreparer is MuPDFDisplayDocumentPreparer,
+        if displayDocumentPreparer is SwiftPDFDisplayDocumentPreparer,
            let direct = documentBuilder.build(from: url) {
             loadedDocument = direct
         } else {

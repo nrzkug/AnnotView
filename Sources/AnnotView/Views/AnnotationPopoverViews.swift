@@ -14,6 +14,8 @@ struct AnnotationPreviewConfiguration {
     let onPin: @MainActor () -> Void
     /// Temporary popover behaviour override while a status menu is tracking.
     let onStatusMenuTracking: @MainActor (Bool) -> Void
+    /// Dismisses the popover (e.g. when cancelling or saving leaves no comment to preview).
+    let onDismiss: @MainActor () -> Void
 }
 
 @MainActor
@@ -41,7 +43,8 @@ struct AnnotationPreviewSwapView: View {
                 onUpdateStatus: model.configuration.onUpdateStatus,
                 onHeightChange: model.configuration.onHeightChange,
                 onPin: model.configuration.onPin,
-                onStatusMenuTracking: model.configuration.onStatusMenuTracking
+                onStatusMenuTracking: model.configuration.onStatusMenuTracking,
+                onDismiss: model.configuration.onDismiss
             )
             .id(model.configuration.annotation.id)
             .transition(.opacity)
@@ -57,6 +60,7 @@ struct AnnotationPopoverView: View {
     let onHeightChange: @MainActor (CGFloat) -> Void
     let onPin: @MainActor () -> Void
     let onStatusMenuTracking: @MainActor (Bool) -> Void
+    let onDismiss: @MainActor () -> Void
 
     @State private var commentText: String
     @State private var status: Annotation.Status
@@ -84,7 +88,8 @@ struct AnnotationPopoverView: View {
         onUpdateStatus: @escaping @MainActor (Annotation.Status) async -> Bool,
         onHeightChange: @escaping @MainActor (CGFloat) -> Void,
         onPin: @escaping @MainActor () -> Void,
-        onStatusMenuTracking: @escaping @MainActor (Bool) -> Void
+        onStatusMenuTracking: @escaping @MainActor (Bool) -> Void,
+        onDismiss: @escaping @MainActor () -> Void = {}
     ) {
         self.annotation = annotation
         self.onSave = onSave
@@ -92,6 +97,7 @@ struct AnnotationPopoverView: View {
         self.onHeightChange = onHeightChange
         self.onPin = onPin
         self.onStatusMenuTracking = onStatusMenuTracking
+        self.onDismiss = onDismiss
         let contents = annotation.contents?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         _commentText = State(initialValue: contents)
         _status = State(initialValue: annotation.status)
@@ -356,6 +362,10 @@ struct AnnotationPopoverView: View {
 
     private func cancelEditing() {
         guard !isSaving else { return }
+        if commentText.isEmpty {
+            onDismiss()
+            return
+        }
         draft = commentText
         isEditing = false
     }
@@ -369,7 +379,11 @@ struct AnnotationPopoverView: View {
             isSaving = false
             if saved {
                 commentText = next
-                isEditing = false
+                if next.isEmpty {
+                    onDismiss()
+                } else {
+                    isEditing = false
+                }
             }
         }
     }

@@ -226,6 +226,10 @@ final class AnnotationPopoverCoordinator: NSObject, NSPopoverDelegate {
             },
             onStatusMenuTracking: { [weak self] isTracking in
                 self?.setStatusMenuTracking(isTracking)
+            },
+            onDismiss: { [weak self] in
+                guard let self, self.activePopover?.presentationID == presentationID else { return }
+                self.dismiss()
             }
         )
     }

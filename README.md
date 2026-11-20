@@ -29,14 +29,13 @@ Requires only Xcode Command Line Tools.
 ```sh
 Scripts/package.sh    # build + stage dist/AnnotView.app; add --stage to skip install/launch
 
-# Direct SwiftPM builds need the bundled MuPDF built once first:
-Scripts/build-mupdf.sh
+# Or build and test directly with SwiftPM:
 swift build -c release --product AnnotView
 swift test
 ```
 
-`Scripts/build-mupdf.sh` compiles a minimal MuPDF from a pinned tarball (cached in `.mupdf-cache/`); the app bundles a single `libmupdf.dylib`, so installed copies need nothing else.
+AnnotView uses a pure-Swift PDF annotation engine with zero native C/C++ dependencies.
 
 ## License
 
-AnnotView is licensed under the [GNU Affero General Public License v3](LICENSE).
+AnnotView is licensed under the [MIT License](LICENSE).
