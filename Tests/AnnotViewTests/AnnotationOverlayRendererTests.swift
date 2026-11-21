@@ -472,6 +472,205 @@ struct PDFDocumentManagerTests {
         #expect(manager.thumbnailRevision > initialRevision)
         #expect(manager.cachedThumbnail(for: 0, scale: 0.5) == nil)
     }
+
+    @Test @MainActor
+    func perPageThumbnailInvalidationPreservesUntouchedPages() async throws {
+        let image = NSImage(size: NSSize(width: 200, height: 200))
+        image.lockFocus()
+        NSColor.white.setFill()
+        NSRect(origin: .zero, size: image.size).fill()
+        image.unlockFocus()
+        let page0 = try #require(PDFPage(image: image))
+        let page1 = try #require(PDFPage(image: image))
+        let document = PDFDocument()
+        document.insert(page0, at: 0)
+        document.insert(page1, at: 1)
+
+        let tempURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("thumb-per-page-\(UUID().uuidString).pdf")
+        #expect(document.write(to: tempURL))
+        defer { try? FileManager.default.removeItem(at: tempURL) }
+
+        let manager = PDFDocumentManager()
+        await manager.open(url: tempURL)
+        #expect(manager.pageCount == 2)
+
+        _ = await manager.renderPageAsync(pageIndex: 0, scale: 0.5)
+        _ = await manager.renderPageAsync(pageIndex: 1, scale: 0.5)
+        #expect(manager.cachedThumbnail(for: 0, scale: 0.5) != nil)
+        #expect(manager.cachedThumbnail(for: 1, scale: 0.5) != nil)
+
+        let rev0Before = manager.thumbnailRevision(for: 0)
+        let rev1Before = manager.thumbnailRevision(for: 1)
+
+        let created = await manager.createNote(at: PDFPagePoint(pageIndex: 0, point: CGPoint(x: 60, y: 60)))
+        #expect(created != nil)
+
+        #expect(manager.thumbnailRevision(for: 0) > rev0Before)
+        #expect(manager.cachedThumbnail(for: 0, scale: 0.5) == nil)
+        #expect(manager.thumbnailRevision(for: 1) == rev1Before)
+        #expect(manager.cachedThumbnail(for: 1, scale: 0.5) != nil)
+    }
+
+    @Test @MainActor
+    func concurrentMutationsSerializeWithoutDroppingActions() async throws {
+        let image = NSImage(size: NSSize(width: 200, height: 200))
+        image.lockFocus()
+        NSColor.white.setFill()
+        NSRect(origin: .zero, size: image.size).fill()
+        image.unlockFocus()
+        let page = try #require(PDFPage(image: image))
+        let document = PDFDocument()
+        document.insert(page, at: 0)
+
+        let tempURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("concurrent-mutations-\(UUID().uuidString).pdf")
+        #expect(document.write(to: tempURL))
+        defer { try? FileManager.default.removeItem(at: tempURL) }
+
+        let manager = PDFDocumentManager()
+        await manager.open(url: tempURL)
+
+        let initialNote = try #require(
+            await manager.createNote(at: PDFPagePoint(pageIndex: 0, point: CGPoint(x: 40, y: 40)))
+        )
+
+        async let didUpdate = manager.updateAnnotation(initialNote, contents: "Saved concurrently")
+        async let createdSecond = manager.createNote(at: PDFPagePoint(pageIndex: 0, point: CGPoint(x: 120, y: 120)))
+
+        let (updateOK, secondNote) = await (didUpdate, createdSecond)
+        #expect(updateOK)
+        #expect(secondNote != nil)
+        #expect(manager.annotations.count == 2)
+        #expect(manager.annotations.first(where: { $0.sourceID == initialNote.sourceID })?.contents == "Saved concurrently")
+
+        let persisted = try await SwiftPDFAnnotationParser().annotations(in: tempURL)
+        #expect(persisted.count == 2)
+        #expect(persisted.first(where: { $0.sourceID == initialNote.sourceID })?.contents == "Saved concurrently")
+    }
+
+    @Test @MainActor
+    func asyncSearchFindsMatchesWithoutBlockingAndCancelsCleanly() async throws {
+        let pdfData = NSMutableData()
+        var mediaBox = CGRect(x: 0, y: 0, width: 400, height: 400)
+        let consumer = try #require(CGDataConsumer(data: pdfData))
+        let pdfContext = try #require(CGContext(consumer: consumer, mediaBox: &mediaBox, nil))
+        for pageText in ["First page Reviewer token", "Second page Reviewer match"] {
+            pdfContext.beginPDFPage(nil)
+            let nsContext = NSGraphicsContext(cgContext: pdfContext, flipped: false)
+            NSGraphicsContext.saveGraphicsState()
+            NSGraphicsContext.current = nsContext
+            (pageText as NSString).draw(
+                at: NSPoint(x: 40, y: 300),
+                withAttributes: [.font: NSFont.systemFont(ofSize: 16)]
+            )
+            NSGraphicsContext.restoreGraphicsState()
+            pdfContext.endPDFPage()
+        }
+        pdfContext.closePDF()
+
+        let tempURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("async-search-\(UUID().uuidString).pdf")
+        try (pdfData as Data).write(to: tempURL)
+        defer { try? FileManager.default.removeItem(at: tempURL) }
+
+        let manager = PDFDocumentManager()
+        await manager.open(url: tempURL)
+        #expect(manager.pageCount == 2)
+
+        manager.searchController.query = "Reviewer"
+        manager.performSearchAsync()
+
+        for _ in 0..<100 where manager.searchController.isSearching {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+
+        #expect(!manager.searchController.isSearching)
+        #expect(manager.searchController.hasCompletedSearch)
+        #expect(manager.searchController.results.count == 2)
+        #expect(manager.searchController.resultsRevision > 0)
+        #expect(manager.searchController.currentResultIndex == 0)
+
+        manager.searchController.reset()
+        #expect(manager.searchController.results.isEmpty)
+        #expect(manager.searchController.currentResultIndex == nil)
+        #expect(!manager.searchController.isSearching)
+    }
+
+    @Test @MainActor
+    func documentCloseReleasesDocumentAndCaches() async throws {
+        let image = NSImage(size: NSSize(width: 200, height: 200))
+        image.lockFocus()
+        NSColor.white.setFill()
+        NSRect(origin: .zero, size: image.size).fill()
+        image.unlockFocus()
+        let page = try #require(PDFPage(image: image))
+        let document = PDFDocument()
+        document.insert(page, at: 0)
+
+        let tempURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("close-cleanup-\(UUID().uuidString).pdf")
+        #expect(document.write(to: tempURL))
+        defer { try? FileManager.default.removeItem(at: tempURL) }
+
+        let manager = PDFDocumentManager()
+        await manager.open(url: tempURL)
+        _ = await manager.renderPageAsync(pageIndex: 0, scale: 0.5)
+        #expect(manager.document != nil)
+        #expect(manager.cachedThumbnail(for: 0, scale: 0.5) != nil)
+
+        manager.close()
+        #expect(manager.document == nil)
+        #expect(manager.documentURL == nil)
+        #expect(manager.annotations.isEmpty)
+        #expect(manager.cachedThumbnail(for: 0, scale: 0.5) == nil)
+    }
+
+    @Test
+    func overlayHitTestingHandlesQuadsAndFallbackRect() {
+        let quadHighlight = Annotation(
+            kind: .highlight,
+            pageIndex: 0,
+            bounds: CGRect(x: 10, y: 10, width: 100, height: 20),
+            quadPoints: [
+                CGPoint(x: 10, y: 30), CGPoint(x: 110, y: 30),
+                CGPoint(x: 10, y: 10), CGPoint(x: 110, y: 10)
+            ]
+        )
+        #expect(AnnotationOverlayRenderer.contains(CGPoint(x: 50, y: 20), in: quadHighlight))
+        #expect(!AnnotationOverlayRenderer.contains(CGPoint(x: 50, y: 50), in: quadHighlight))
+
+        let rectHighlight = Annotation(
+            kind: .highlight,
+            pageIndex: 0,
+            bounds: CGRect(x: 20, y: 40, width: 80, height: 15)
+        )
+        #expect(AnnotationOverlayRenderer.contains(CGPoint(x: 50, y: 45), in: rectHighlight))
+        #expect(!AnnotationOverlayRenderer.contains(CGPoint(x: 5, y: 5), in: rectHighlight))
+
+        let underlineNoQuads = Annotation(
+            kind: .underline,
+            pageIndex: 0,
+            bounds: CGRect(x: 20, y: 40, width: 80, height: 15)
+        )
+        #expect(!AnnotationOverlayRenderer.contains(CGPoint(x: 50, y: 45), in: underlineNoQuads))
+
+        let note = Annotation(
+            kind: .note,
+            pageIndex: 0,
+            bounds: CGRect(x: 90, y: 90, width: 20, height: 20)
+        )
+        #expect(AnnotationOverlayRenderer.contains(CGPoint(x: 100, y: 100), in: note))
+        #expect(!AnnotationOverlayRenderer.contains(CGPoint(x: 130, y: 130), in: note))
+
+        let caret = Annotation(
+            kind: .caret,
+            pageIndex: 0,
+            bounds: CGRect(x: 150, y: 150, width: 8.8, height: 7.2)
+        )
+        #expect(AnnotationOverlayRenderer.contains(CGPoint(x: 154, y: 153), in: caret))
+        #expect(!AnnotationOverlayRenderer.contains(CGPoint(x: 180, y: 180), in: caret))
+    }
 }
 
 private struct FixedAnnotationParser: AnnotationParsing {

@@ -4,6 +4,12 @@ import Foundation
 /// Pure-Swift PDF annotation parser with 100% behavioral parity with `MuPDFAnnotationParser`.
 /// Reads `/Annots` directly in PDF user space without intermediate coordinate transforms.
 struct SwiftPDFAnnotationParser: AnnotationParsing {
+    private let storeCache: PDFDocumentStoreCache
+
+    init(storeCache: PDFDocumentStoreCache = .shared) {
+        self.storeCache = storeCache
+    }
+
     private struct RawAnnotation {
         let sourceID: String?
         let inReplyToSourceID: String?
@@ -21,7 +27,7 @@ struct SwiftPDFAnnotationParser: AnnotationParsing {
     }
 
     func annotations(in documentURL: URL) async throws -> [Annotation] {
-        let store = try PDFDocumentStore(url: documentURL)
+        let store = try await storeCache.store(for: documentURL)
         return parseAnnotations(in: store)
     }
 

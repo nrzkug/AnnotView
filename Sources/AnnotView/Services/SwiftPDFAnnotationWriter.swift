@@ -4,6 +4,12 @@ import Foundation
 /// Pure-Swift PDF annotation writer using append-only PDF incremental updates.
 /// Maintains 100% behavioral parity with `MuPDFAnnotationWriter`.
 actor SwiftPDFAnnotationWriter: AnnotationWriting {
+    private let storeCache: PDFDocumentStoreCache
+
+    init(storeCache: PDFDocumentStoreCache = .shared) {
+        self.storeCache = storeCache
+    }
+
     enum WriterError: LocalizedError {
         case unsupportedKind
         case emptySelection
@@ -27,7 +33,7 @@ actor SwiftPDFAnnotationWriter: AnnotationWriting {
     func perform(_ mutations: [AnnotationMutation], in documentURL: URL) async throws {
         guard !mutations.isEmpty else { return }
 
-        let store = try PDFDocumentStore(url: documentURL)
+        let store = try await storeCache.store(for: documentURL)
         let writer = PDFIncrementalWriter(store: store)
         let pages = store.pages()
 
@@ -35,8 +41,10 @@ actor SwiftPDFAnnotationWriter: AnnotationWriting {
             try apply(mutation, pages: pages, writer: writer)
         }
 
-        let outputData = writer.buildData()
-        try PDFIncrementalWriter.saveAtomically(outputData, to: documentURL)
+        let suffix = try writer.saveIncrementally(to: documentURL)
+        if !suffix.isEmpty {
+            await storeCache.update(appending: suffix, to: store, for: documentURL)
+        }
     }
 
     // MARK: - Mutation Application
@@ -312,18 +320,26 @@ actor SwiftPDFAnnotationWriter: AnnotationWriting {
         if let color {
             let existingOpacity = writer.resolve(dict["CA"])?.realValue ?? 1.0
             let opacity = color.alpha > 0 ? Double(color.alpha) : (existingOpacity > 0 ? existingOpacity : 1.0)
+            let apMatchesExisting = dict["AP"] != nil && appearanceColorMatches(
+                in: dict,
+                color: color,
+                opacity: opacity,
+                writer: writer
+            )
             dict["C"] = colorArray(color)
             dict["CA"] = .real(opacity)
 
-            let apColor = PDFAppearanceGenerator.Color(
-                red: Double(color.red),
-                green: Double(color.green),
-                blue: Double(color.blue),
-                opacity: opacity
-            )
-            if let apStream = regeneratedAppearance(for: dict, color: apColor, writer: writer) {
-                let apRef = writer.allocateObject(apStream)
-                dict["AP"] = .dict(["N": .indirectRef(objNum: apRef.objNum, genNum: apRef.genNum)])
+            if !apMatchesExisting {
+                let apColor = PDFAppearanceGenerator.Color(
+                    red: Double(color.red),
+                    green: Double(color.green),
+                    blue: Double(color.blue),
+                    opacity: opacity
+                )
+                if let apStream = regeneratedAppearance(for: dict, color: apColor, writer: writer) {
+                    let apRef = writer.allocateObject(apStream)
+                    dict["AP"] = .dict(["N": .indirectRef(objNum: apRef.objNum, genNum: apRef.genNum)])
+                }
             }
         }
 
@@ -385,6 +401,29 @@ actor SwiftPDFAnnotationWriter: AnnotationWriting {
             }
         }
         return nil
+    }
+
+    private func appearanceColorMatches(
+        in dict: [String: PDFObject],
+        color: Annotation.Color,
+        opacity: Double,
+        writer: PDFIncrementalWriter
+    ) -> Bool {
+        guard let apDict = writer.resolve(dict["AP"])?.dictValue,
+              apDict["N"] != nil,
+              let colorComponents = writer.resolve(dict["C"])?.arrayValue,
+              colorComponents.count == 3,
+              let r = writer.resolve(colorComponents[0])?.realValue,
+              let g = writer.resolve(colorComponents[1])?.realValue,
+              let b = writer.resolve(colorComponents[2])?.realValue else {
+            return false
+        }
+        let existingOpacity = writer.resolve(dict["CA"])?.realValue ?? 1.0
+        let tolerance = 1e-4
+        return abs(r - Double(color.red)) < tolerance
+            && abs(g - Double(color.green)) < tolerance
+            && abs(b - Double(color.blue)) < tolerance
+            && abs(existingOpacity - opacity) < tolerance
     }
 
     private func regeneratedAppearance(

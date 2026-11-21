@@ -78,17 +78,24 @@ final class AnnotationPopoverCoordinator: NSObject, NSPopoverDelegate {
 
     func dismiss(for annotationID: UUID) {
         guard activePopover?.annotationID == annotationID else { return }
-        dismiss()
+        pendingShow = nil
+        closeCurrentPopover(commitPendingEdit: false)
     }
 
     func reconcile(availableAnnotationIDs: Set<UUID>) {
         guard let annotationID = activePopover?.annotationID,
               !availableAnnotationIDs.contains(annotationID) else { return }
-        dismiss()
+        pendingShow = nil
+        closeCurrentPopover(commitPendingEdit: false)
     }
 
     func reset() {
-        dismiss()
+        pendingShow = nil
+        closeCurrentPopover(commitPendingEdit: false)
+    }
+
+    func popoverWillClose(_ notification: Notification) {
+        flushPendingEdit(from: notification.object as? NSPopover)
     }
 
     func popoverDidClose(_ notification: Notification) {
@@ -257,6 +264,7 @@ final class AnnotationPopoverCoordinator: NSObject, NSPopoverDelegate {
         page: PDFPage
     ) {
         guard let hostView else { return }
+        flushPendingEdit(from: popover)
         // Adopt the new presentation before swapping content so height reports
         // from the incoming card are accepted and the outgoing card's are not.
         activePopover = state
@@ -431,10 +439,29 @@ final class AnnotationPopoverCoordinator: NSObject, NSPopoverDelegate {
     func dismiss() {
         // Dismissing from the outside cancels any deferred replacement.
         pendingShow = nil
-        closeCurrentPopover()
+        closeCurrentPopover(commitPendingEdit: true)
     }
 
-    private func closeCurrentPopover(animated: Bool = true) {
+    private func flushPendingEdit(from targetPopover: NSPopover?) {
+        guard let controller = targetPopover?.contentViewController
+            as? NSHostingController<AnnotationPreviewSwapView>,
+              let pending = controller.rootView.model.consumePendingEdit() else {
+            return
+        }
+        Task { @MainActor in
+            _ = await pending.onSave(pending.contents)
+        }
+    }
+
+    private func discardPendingEdit(from targetPopover: NSPopover?) {
+        guard let controller = targetPopover?.contentViewController
+            as? NSHostingController<AnnotationPreviewSwapView> else {
+            return
+        }
+        _ = controller.rootView.model.consumePendingEdit()
+    }
+
+    private func closeCurrentPopover(animated: Bool = true, commitPendingEdit: Bool = true) {
         hoverDismissTask?.cancel()
         hostView?.cancelPendingHoverPresentation()
         if let monitor = popoverMouseDownMonitor {
@@ -443,6 +470,11 @@ final class AnnotationPopoverCoordinator: NSObject, NSPopoverDelegate {
         }
 
         let closingPopover = popover
+        if commitPendingEdit {
+            flushPendingEdit(from: closingPopover)
+        } else {
+            discardPendingEdit(from: closingPopover)
+        }
         var closingPreview = false
         if case .preview = activePopover?.kind { closingPreview = true }
 

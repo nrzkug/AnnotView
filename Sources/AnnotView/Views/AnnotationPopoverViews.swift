@@ -20,10 +20,26 @@ struct AnnotationPreviewConfiguration {
 
 @MainActor
 final class AnnotationPreviewModel: ObservableObject {
+    struct PendingEdit {
+        let annotation: Annotation
+        let contents: String
+        let onSave: @MainActor (String) async -> Bool
+    }
+
     @Published var configuration: AnnotationPreviewConfiguration
+    private(set) var pendingEdit: PendingEdit?
 
     init(configuration: AnnotationPreviewConfiguration) {
         self.configuration = configuration
+    }
+
+    func updatePendingEdit(_ edit: PendingEdit?) {
+        pendingEdit = edit
+    }
+
+    func consumePendingEdit() -> PendingEdit? {
+        defer { pendingEdit = nil }
+        return pendingEdit
     }
 }
 
@@ -44,7 +60,21 @@ struct AnnotationPreviewSwapView: View {
                 onHeightChange: model.configuration.onHeightChange,
                 onPin: model.configuration.onPin,
                 onStatusMenuTracking: model.configuration.onStatusMenuTracking,
-                onDismiss: model.configuration.onDismiss
+                onDismiss: model.configuration.onDismiss,
+                onPendingEditChange: { contents in
+                    if let contents {
+                        let config = model.configuration
+                        model.updatePendingEdit(
+                            AnnotationPreviewModel.PendingEdit(
+                                annotation: config.annotation,
+                                contents: contents,
+                                onSave: config.onSave
+                            )
+                        )
+                    } else {
+                        model.updatePendingEdit(nil)
+                    }
+                }
             )
             .id(model.configuration.annotation.id)
             .transition(.opacity)
@@ -61,6 +91,7 @@ struct AnnotationPopoverView: View {
     let onPin: @MainActor () -> Void
     let onStatusMenuTracking: @MainActor (Bool) -> Void
     let onDismiss: @MainActor () -> Void
+    let onPendingEditChange: @MainActor (String?) -> Void
 
     @State private var commentText: String
     @State private var status: Annotation.Status
@@ -77,7 +108,7 @@ struct AnnotationPopoverView: View {
 
     static let width: CGFloat = 368
     private static let textWidth: CGFloat = 340
-    private static let textFontSize: CGFloat = 13.3
+    private static let textFontSize: CGFloat = 13
     private static let textLineSpacing: CGFloat = 4
     private static let maxCommentHeight: CGFloat = 480
 
@@ -89,7 +120,8 @@ struct AnnotationPopoverView: View {
         onHeightChange: @escaping @MainActor (CGFloat) -> Void,
         onPin: @escaping @MainActor () -> Void,
         onStatusMenuTracking: @escaping @MainActor (Bool) -> Void,
-        onDismiss: @escaping @MainActor () -> Void = {}
+        onDismiss: @escaping @MainActor () -> Void = {},
+        onPendingEditChange: @escaping @MainActor (String?) -> Void = { _ in }
     ) {
         self.annotation = annotation
         self.onSave = onSave
@@ -98,6 +130,7 @@ struct AnnotationPopoverView: View {
         self.onPin = onPin
         self.onStatusMenuTracking = onStatusMenuTracking
         self.onDismiss = onDismiss
+        self.onPendingEditChange = onPendingEditChange
         let contents = annotation.contents?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         _commentText = State(initialValue: contents)
         _status = State(initialValue: annotation.status)
@@ -142,13 +175,13 @@ struct AnnotationPopoverView: View {
             .layoutPriority(1)
 
             if isEditing {
-                HStack(spacing: 3) {
-                    GhostIconButton(icon: "x", help: "Cancel editing", tint: .secondary) {
+                HStack(spacing: 6) {
+                    GhostIconButton(icon: "x", help: "Cancel editing (Esc)", tint: .secondary) {
                         cancelEditing()
                     }
                     GhostIconButton(
                         icon: "check",
-                        help: "Save comment",
+                        help: "Save comment (⌘↩)",
                         tint: .accentColor,
                         enabled: !isSaving
                     ) {
@@ -156,7 +189,7 @@ struct AnnotationPopoverView: View {
                     }
                 }
             } else {
-                HStack(spacing: 3) {
+                HStack(spacing: 6) {
                     copyButton
                     GhostIconButton(icon: "pencil", help: "Edit comment", tint: .secondary) {
                         beginEditing()
@@ -213,8 +246,8 @@ struct AnnotationPopoverView: View {
                     .opacity(0.68)
             }
             .foregroundStyle(statusTint)
-            .padding(.horizontal, 7)
-            .frame(height: 24)
+            .padding(.horizontal, 8)
+            .frame(height: 26)
             .background(statusTint.opacity(hoveringStatus ? 0.17 : 0.11))
             .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
             .overlay {
@@ -227,6 +260,7 @@ struct AnnotationPopoverView: View {
         .buttonStyle(.plain)
         .fixedSize()
         .onHover { hoveringStatus = $0 }
+        .accessibilityLabel("Review status: \(status.displayName)")
         .help("\(status.displayName): \(status.help)")
     }
 
@@ -295,15 +329,30 @@ struct AnnotationPopoverView: View {
     private func measurableCommentText(for text: String) -> some View {
         Text(text)
             .font(.system(size: Self.textFontSize))
-            .foregroundStyle(.primary)
+            .foregroundStyle(commentText.isEmpty ? .secondary : .primary)
             .lineSpacing(Self.textLineSpacing)
             .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: .infinity, alignment: .leading)
     }
 
+    private var draftBinding: Binding<String> {
+        Binding(
+            get: { draft },
+            set: { newValue in
+                draft = newValue
+                syncPendingEdit(
+                    editing: isEditing,
+                    draftText: newValue,
+                    savedText: commentText,
+                    saving: isSaving
+                )
+            }
+        )
+    }
+
     private var editorSection: some View {
         InlineCommentEditor(
-            text: $draft,
+            text: draftBinding,
             font: .systemFont(ofSize: Self.textFontSize),
             textColor: .labelColor,
             lineSpacing: Self.textLineSpacing,
@@ -347,7 +396,10 @@ struct AnnotationPopoverView: View {
     }
 
     private var statusTint: Color {
-        status.tint
+        switch status {
+        case .none, .unmarked: .primary.opacity(0.72)
+        default: status.tint
+        }
     }
 
     private var effectiveFullTextHeight: CGFloat {
@@ -358,10 +410,12 @@ struct AnnotationPopoverView: View {
         guard !isEditing else { return }
         draft = commentText
         isEditing = true
+        onPendingEditChange(nil)
     }
 
     private func cancelEditing() {
         guard !isSaving else { return }
+        onPendingEditChange(nil)
         if commentText.isEmpty {
             onDismiss()
             return
@@ -373,6 +427,7 @@ struct AnnotationPopoverView: View {
     private func commitEditing() {
         guard !isSaving else { return }
         let next = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        onPendingEditChange(nil)
         isSaving = true
         Task {
             let saved = await onSave(next)
@@ -384,8 +439,29 @@ struct AnnotationPopoverView: View {
                 } else {
                     isEditing = false
                 }
+            } else {
+                syncPendingEdit(
+                    editing: isEditing,
+                    draftText: draft,
+                    savedText: commentText,
+                    saving: false
+                )
             }
         }
+    }
+
+    private func syncPendingEdit(
+        editing: Bool,
+        draftText: String,
+        savedText: String,
+        saving: Bool
+    ) {
+        guard editing, !saving else {
+            onPendingEditChange(nil)
+            return
+        }
+        let normalized = draftText.trimmingCharacters(in: .whitespacesAndNewlines)
+        onPendingEditChange(normalized == savedText ? nil : normalized)
     }
 
     private func applyStatus(_ next: Annotation.Status) {
@@ -450,7 +526,7 @@ private struct GhostIconButton: View {
                 .scaledToFit()
                 .foregroundStyle(tint)
                 .frame(width: 14, height: 14)
-                .frame(width: 24, height: 24)
+                .frame(width: 28, height: 28)
                 .background(background ?? ((isHovering?.wrappedValue ?? hovering) ? Color.primary.opacity(0.06) : Color.clear))
                 .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
                 .contentShape(Rectangle())

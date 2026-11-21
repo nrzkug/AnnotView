@@ -24,7 +24,9 @@ final class AnnotationPageOverlayView: NSView {
         }
     }
     var annotations: [Annotation] {
-        didSet { needsDisplay = true }
+        didSet {
+            if oldValue != annotations { needsDisplay = true }
+        }
     }
 
     init(

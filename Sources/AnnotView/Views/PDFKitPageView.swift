@@ -4,7 +4,7 @@ import SwiftUI
 struct PDFKitPageView: NSViewRepresentable {
     let document: PDFDocument
     let topContentInset: CGFloat
-    let annotations: [Annotation]
+    let annotationsByPage: [Int: [Annotation]]
     let focusedAnnotation: Annotation?
     let annotationNavigationID: Int
     let annotationPresentationRequest: AnnotationPresentationRequest
@@ -12,6 +12,7 @@ struct PDFKitPageView: NSViewRepresentable {
     let onSelectAnnotationRequest: @MainActor (UUID) -> Void
     let onDeselectAnnotationRequest: @MainActor () -> Void
     let searchResults: [PDFSelection]
+    let searchResultsRevision: Int
     let currentSearchResultIndex: Int?
     let searchNavigationID: Int
     let zoomAction: PDFDocumentManager.ZoomAction
@@ -38,7 +39,7 @@ struct PDFKitPageView: NSViewRepresentable {
         view.displayDirection = .vertical
         view.displaysPageBreaks = true
         view.pageShadowsEnabled = true
-        view.backgroundColor = .windowBackgroundColor
+        view.backgroundColor = .underPageBackgroundColor
         view.delegate = context.coordinator
         view.pageOverlayViewProvider = view
         view.selectedAnnotationID = selectedAnnotationID
@@ -50,8 +51,10 @@ struct PDFKitPageView: NSViewRepresentable {
     }
 
     func updateNSView(_ view: AnnotationPDFView, context: Context) {
+        let insetChanged = view.topContentInset != topContentInset
+        let documentChanged = view.document !== document
         view.topContentInset = topContentInset
-        if view.document !== document {
+        if documentChanged {
             view.resetAnnotationInteraction()
             view.document = document
             view.autoScales = false
@@ -60,10 +63,15 @@ struct PDFKitPageView: NSViewRepresentable {
                 view.scaleFactor = fittedScale
             }
         }
-        view.overlayAnnotations = Dictionary(grouping: annotations, by: \.pageIndex)
+        view.overlayAnnotations = annotationsByPage
         view.observeDocumentScrolling()
-        view.applyReaderContentInsets()
-        view.highlightedSelections = searchResults
+        if insetChanged || documentChanged {
+            view.applyReaderContentInsets()
+        }
+        if view.lastSearchResultsRevision != searchResultsRevision {
+            view.lastSearchResultsRevision = searchResultsRevision
+            view.highlightedSelections = searchResults
+        }
         view.selectedAnnotationID = selectedAnnotationID
         view.onSelectAnnotationRequest = onSelectAnnotationRequest
         view.onDeselectAnnotationRequest = onDeselectAnnotationRequest

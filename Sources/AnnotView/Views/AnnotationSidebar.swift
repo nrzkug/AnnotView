@@ -8,8 +8,22 @@ struct AnnotationSidebar: View {
     @State private var hoveringFilter = false
     @State private var filterMenuTarget = AnnotationStatusMenuTarget()
     @State private var filterAnchorView: NSView?
+    @State private var cachedSnapshot: SidebarSnapshot?
+
+    private var snapshot: SidebarSnapshot {
+        if let cachedSnapshot,
+           cachedSnapshot.annotations == documentManager.annotations,
+           cachedSnapshot.statusFilter == statusFilter {
+            return cachedSnapshot
+        }
+        return SidebarSnapshot.build(
+            annotations: documentManager.annotations,
+            statusFilter: statusFilter
+        )
+    }
 
     var body: some View {
+        let current = snapshot
         Group {
             if documentManager.document == nil {
                 ContentUnavailableView("Annotations", systemImage: "text.bubble")
@@ -27,47 +41,78 @@ struct AnnotationSidebar: View {
                 }
             } else {
                 VStack(spacing: 0) {
-                    statusFilterHeader
+                    statusFilterHeader(snapshot: current)
                     Divider()
 
-                    if threads.isEmpty {
+                    if current.threads.isEmpty {
                         emptyFilterState
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
                     } else {
-                        List(selection: annotationSelectionBinding) {
-                            ForEach(pageGroups) { pageGroup in
-                                Section {
-                                    ForEach(pageGroup.threads) { thread in
-                                        AnnotationListItem(annotation: thread.root) {
-                                            annotationListIsFocused = true
-                                        }
-
-                                        ForEach(thread.replies) { reply in
-                                            AnnotationListItem(annotation: reply, isReply: true) {
+                        ScrollViewReader { proxy in
+                            List(selection: annotationSelectionBinding(visibleIDs: current.visibleAnnotationIDs)) {
+                                ForEach(current.pageGroups) { pageGroup in
+                                    Section {
+                                        ForEach(pageGroup.threads) { thread in
+                                            AnnotationListItem(
+                                                annotation: thread.root,
+                                                isListFocused: annotationListIsFocused
+                                            ) {
                                                 annotationListIsFocused = true
                                             }
+                                            .id(thread.root.id)
+
+                                            ForEach(thread.replies) { reply in
+                                                AnnotationListItem(
+                                                    annotation: reply,
+                                                    isReply: true,
+                                                    isListFocused: annotationListIsFocused
+                                                ) {
+                                                    annotationListIsFocused = true
+                                                }
+                                                .id(reply.id)
+                                            }
                                         }
+                                    } header: {
+                                        pageHeader(for: pageGroup)
                                     }
-                                } header: {
-                                    pageHeader(for: pageGroup)
+                                }
+                            }
+                            .focused($annotationListIsFocused)
+                            .onChange(of: documentManager.selectedAnnotationID) { _, selectedID in
+                                guard let selectedID,
+                                      current.visibleAnnotationIDs.contains(selectedID) else { return }
+                                withAnimation(.easeInOut(duration: 0.15)) {
+                                    proxy.scrollTo(selectedID, anchor: .center)
                                 }
                             }
                         }
-                        .focused($annotationListIsFocused)
                     }
                 }
             }
         }
-        .onChange(of: visibleAnnotationIDs) { _, ids in
+        .onAppear { refreshSnapshot() }
+        .onChange(of: documentManager.annotations) { refreshSnapshot() }
+        .onChange(of: statusFilter) { refreshSnapshot() }
+        .onChange(of: current.visibleAnnotationIDs) { _, ids in
             documentManager.retainSelectedAnnotations(ids)
+        }
+    }
+
+    private func refreshSnapshot() {
+        let next = SidebarSnapshot.build(
+            annotations: documentManager.annotations,
+            statusFilter: statusFilter
+        )
+        if cachedSnapshot != next {
+            cachedSnapshot = next
         }
     }
 
     /// Native macOS list selection: the system draws the highlight and
     /// keyboard arrows move between annotations, each selection navigating.
-    private var annotationSelectionBinding: Binding<Set<UUID>> {
+    private func annotationSelectionBinding(visibleIDs: Set<UUID>) -> Binding<Set<UUID>> {
         Binding(
-            get: { documentManager.selectedAnnotationIDs.intersection(visibleAnnotationIDs) },
+            get: { documentManager.selectedAnnotationIDs.intersection(visibleIDs) },
             set: { ids in
                 annotationListIsFocused = true
                 documentManager.selectAnnotations(ids)
@@ -86,29 +131,47 @@ struct AnnotationSidebar: View {
                 Text("No \(statusFilter.displayName.lowercased()) annotations")
                     .font(.system(size: 12, weight: .semibold))
             }
-            Button("Show all annotations") {
+            Button("Show All Annotations") {
                 self.statusFilter = nil
             }
             .buttonStyle(.link)
-            .font(.system(size: 11.5))
+            .font(.system(size: 12))
         }
         .padding(.horizontal, 20)
     }
 
-    private var statusFilterHeader: some View {
+    private func statusFilterHeader(snapshot: SidebarSnapshot) -> some View {
         HStack(spacing: 8) {
             statusFilterMenu
             Spacer(minLength: 8)
-            Text(summaryText)
+            Text(summaryText(for: snapshot))
                 .font(.system(size: 11))
                 .monospacedDigit()
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
                 .contentTransition(.numericText())
-                .help(summaryHelp)
+                .help(summaryHelp(for: snapshot))
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
+        .padding(.horizontal, 14)
+        .frame(height: 40)
+        .overlay(alignment: .bottom) {
+            if snapshot.totalCount > 0 && snapshot.totalCount > snapshot.pendingCount {
+                GeometryReader { proxy in
+                    let fraction = CGFloat(snapshot.totalCount - snapshot.pendingCount) / CGFloat(snapshot.totalCount)
+                    ZStack(alignment: .leading) {
+                        Rectangle()
+                            .fill(Color.primary.opacity(0.06))
+                            .frame(width: proxy.size.width, height: 2)
+                        Rectangle()
+                            .fill(Color.green.opacity(0.85))
+                            .frame(width: proxy.size.width * fraction, height: 2)
+                            .animation(.easeInOut(duration: 0.25), value: snapshot.pendingCount)
+                    }
+                }
+                .frame(height: 2)
+                .allowsHitTesting(false)
+            }
+        }
     }
 
     private var statusFilterMenu: some View {
@@ -125,8 +188,8 @@ struct AnnotationSidebar: View {
                     .opacity(0.68)
             }
             .foregroundStyle(statusFilter?.tint ?? .primary)
-            .padding(.horizontal, 7)
-            .frame(height: 24)
+            .padding(.horizontal, 8)
+            .frame(height: 26)
             .background(filterTint.opacity(hoveringFilter ? 0.17 : 0.11))
             .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
             .overlay {
@@ -139,6 +202,7 @@ struct AnnotationSidebar: View {
         .buttonStyle(.plain)
         .fixedSize()
         .onHover { hoveringFilter = $0 }
+        .accessibilityLabel("Filter annotations by status: \(filterTitle)")
         .help("Filter by status")
     }
 
@@ -173,68 +237,92 @@ struct AnnotationSidebar: View {
                 .monospacedDigit()
                 .foregroundStyle(.secondary)
         }
+        .padding(.trailing, 14)
     }
 
     private var filterTitle: String {
-        statusFilter?.displayName ?? "All statuses"
+        statusFilter?.displayName ?? "All Statuses"
     }
 
     private var filterTint: Color {
         statusFilter?.tint ?? .primary
     }
 
-    private var summaryText: String {
+    private func summaryText(for snapshot: SidebarSnapshot) -> String {
         if statusFilter != nil {
-            return "\(filteredAnnotationCount) of \(totalAnnotationCount)"
+            return "\(snapshot.filteredCount) of \(snapshot.totalCount)"
         }
-        return "\(pendingCount) pending · \(totalAnnotationCount - pendingCount) reviewed"
+        return "\(snapshot.pendingCount) pending · \(snapshot.totalCount - snapshot.pendingCount) reviewed"
     }
 
-    private var summaryHelp: String {
+    private func summaryHelp(for snapshot: SidebarSnapshot) -> String {
         if let statusFilter {
-            return "Showing \(filteredAnnotationCount) of \(totalAnnotationCount) \(statusFilter.displayName.lowercased()) annotations"
+            return "Showing \(snapshot.filteredCount) of \(snapshot.totalCount) \(statusFilter.displayName.lowercased()) annotations"
         }
-        return "\(pendingCount) pending annotations, \(totalAnnotationCount - pendingCount) with a review status"
-    }
-
-    private var totalAnnotationCount: Int {
-        documentManager.annotations.count
-    }
-
-    private var filteredAnnotationCount: Int {
-        guard let statusFilter else { return totalAnnotationCount }
-        return count(for: statusFilter)
-    }
-
-    private var pendingCount: Int {
-        count(for: .none)
-    }
-
-    private func count(for status: Annotation.Status) -> Int {
-        documentManager.annotations.lazy.filter { $0.status == status }.count
-    }
-
-    private var threads: [AnnotationThread] {
-        guard let statusFilter else {
-            return AnnotationThreading.group(documentManager.annotations)
-        }
-        return documentManager.annotations
-            .filter { $0.status == statusFilter }
-            .map { AnnotationThread(root: $0, replies: []) }
-    }
-
-    private var visibleAnnotationIDs: Set<UUID> {
-        Set(threads.flatMap { [$0.root.id] + $0.replies.map(\.id) })
-    }
-
-    private var pageGroups: [AnnotationPageGroup] {
-        Dictionary(grouping: threads, by: { $0.root.pageIndex })
-            .map { AnnotationPageGroup(pageIndex: $0.key, threads: $0.value) }
-            .sorted { $0.pageIndex < $1.pageIndex }
+        return "\(snapshot.pendingCount) pending annotations, \(snapshot.totalCount - snapshot.pendingCount) with a review status"
     }
 }
 
-private struct AnnotationPageGroup: Identifiable {
+private struct SidebarSnapshot: Equatable {
+    let annotations: [Annotation]
+    let statusFilter: Annotation.Status?
+    let threads: [AnnotationThread]
+    let pageGroups: [AnnotationPageGroup]
+    let visibleAnnotationIDs: Set<UUID>
+    let totalCount: Int
+    let pendingCount: Int
+    let filteredCount: Int
+
+    static func build(
+        annotations: [Annotation],
+        statusFilter: Annotation.Status?
+    ) -> SidebarSnapshot {
+        var pending = 0
+        var filteredCount = 0
+        var filteredAnnotations: [Annotation] = []
+        if statusFilter != nil {
+            filteredAnnotations.reserveCapacity(annotations.count)
+        }
+        for annotation in annotations {
+            if annotation.status == .none {
+                pending += 1
+            }
+            if let statusFilter, annotation.status == statusFilter {
+                filteredCount += 1
+                filteredAnnotations.append(annotation)
+            }
+        }
+        let threads: [AnnotationThread] = if statusFilter != nil {
+            filteredAnnotations.map { AnnotationThread(root: $0, replies: []) }
+        } else {
+            AnnotationThreading.group(annotations)
+        }
+        var visibleIDs = Set<UUID>()
+        visibleIDs.reserveCapacity(threads.count)
+        for thread in threads {
+            visibleIDs.insert(thread.root.id)
+            for reply in thread.replies {
+                visibleIDs.insert(reply.id)
+            }
+        }
+        let pageGroups = Dictionary(grouping: threads, by: { $0.root.pageIndex })
+            .map { AnnotationPageGroup(pageIndex: $0.key, threads: $0.value) }
+            .sorted { $0.pageIndex < $1.pageIndex }
+
+        return SidebarSnapshot(
+            annotations: annotations,
+            statusFilter: statusFilter,
+            threads: threads,
+            pageGroups: pageGroups,
+            visibleAnnotationIDs: visibleIDs,
+            totalCount: annotations.count,
+            pendingCount: pending,
+            filteredCount: statusFilter == nil ? annotations.count : filteredCount
+        )
+    }
+}
+
+private struct AnnotationPageGroup: Identifiable, Equatable {
     var id: Int { pageIndex }
     let pageIndex: Int
     let threads: [AnnotationThread]
@@ -243,15 +331,17 @@ private struct AnnotationPageGroup: Identifiable {
 private struct AnnotationListItem: View {
     @EnvironmentObject private var documentManager: PDFDocumentManager
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.controlActiveState) private var controlActiveState
     @State private var hoveringStatus = false
     @State private var menuTarget = AnnotationStatusMenuTarget()
     @State private var statusAnchorView: NSView?
     let annotation: Annotation
     var isReply = false
+    var isListFocused = false
     let onFocusList: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 5) {
             HStack(spacing: 6) {
                 kindBadge
 
@@ -260,6 +350,14 @@ private struct AnnotationListItem: View {
                     .lineLimit(1)
                     .truncationMode(.tail)
                     .help(annotation.author?.trimmedNilIfEmpty ?? "Unknown author")
+
+                if let shortDateText {
+                    Text("· \(shortDateText)")
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(isEmphasizedSelection ? Color.white.opacity(0.68) : Color.secondary.opacity(0.75))
+                        .lineLimit(1)
+                        .layoutPriority(-1)
+                }
 
                 if isReply {
                     Image(systemName: "arrow.turn.down.right")
@@ -270,8 +368,9 @@ private struct AnnotationListItem: View {
                 Spacer(minLength: 2)
 
                 statusMenu
+                    .padding(.trailing, -6)
             }
-            .foregroundStyle(isSelected ? Color.white.opacity(0.85) : Color.secondary)
+            .foregroundStyle(isEmphasizedSelection ? Color.white.opacity(0.85) : Color.secondary)
 
             if let markedText {
                 HStack(alignment: .top, spacing: 6) {
@@ -279,8 +378,12 @@ private struct AnnotationListItem: View {
                         .fill(kindTint.opacity(0.75))
                         .frame(width: 2.5)
                     Text(markedText)
-                        .font(.system(size: 11.5))
-                        .foregroundStyle(isSelected ? Color.white.opacity(0.72) : Color.secondary)
+                        .font(.system(size: commentText == nil ? 12.5 : 12))
+                        .foregroundStyle(
+                            commentText == nil
+                                ? (isEmphasizedSelection ? Color.white : (isDimmed ? Color.secondary : Color.primary))
+                                : (isEmphasizedSelection ? Color.white.opacity(0.78) : Color.secondary)
+                        )
                         .lineLimit(2)
                         .fixedSize(horizontal: false, vertical: true)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -292,12 +395,19 @@ private struct AnnotationListItem: View {
                 Text(commentText)
                     .font(.system(size: 13))
                     .lineSpacing(2)
-                    .foregroundStyle(isSelected ? Color.white : Color.primary)
+                    .foregroundStyle(isEmphasizedSelection ? Color.white : (isDimmed ? Color.secondary : Color.primary))
                     .lineLimit(isExpanded ? nil : 3)
                     .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.top, markedText == nil ? 0 : 2)
+            } else if markedText == nil {
+                Text(annotation.kind.displayName)
+                    .font(.system(size: 12))
+                    .foregroundStyle(isEmphasizedSelection ? Color.white.opacity(0.75) : Color.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
+        .opacity(isDimmed ? 0.76 : 1)
         .padding(.leading, isReply ? 16 : 0)
         .padding(.vertical, 8)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -356,13 +466,27 @@ private struct AnnotationListItem: View {
         documentManager.selectedAnnotationIDs.contains(annotation.id)
     }
 
+    private var isEmphasizedSelection: Bool {
+        isSelected && isListFocused && controlActiveState == .key
+    }
+
+    private var isResolved: Bool {
+        annotation.status == .completed
+            || annotation.status == .rejected
+            || annotation.status == .cancelled
+    }
+
+    private var isDimmed: Bool {
+        isResolved && !isEmphasizedSelection
+    }
+
     private var isExpanded: Bool {
         isSelected && documentManager.selectedAnnotationID == annotation.id
     }
 
     private var kindBadge: some View {
         RoundedRectangle(cornerRadius: 5, style: .continuous)
-            .fill(kindTint.opacity(0.17))
+            .fill(isEmphasizedSelection ? Color.white.opacity(0.18) : kindTint.opacity(0.17))
             .overlay {
                 Image(annotation.kind.iconName, bundle: .module)
                     .resizable()
@@ -371,6 +495,7 @@ private struct AnnotationListItem: View {
                     .frame(width: 12, height: 12)
             }
             .frame(width: 20, height: 20)
+            .accessibilityLabel(annotation.kind.displayName)
             .help(annotation.kind.displayName)
     }
 
@@ -383,14 +508,14 @@ private struct AnnotationListItem: View {
     }
 
     private var kindInk: Color {
-        isSelected ? .white : kindTint.mix(
+        isEmphasizedSelection ? .white : kindTint.mix(
             with: colorScheme == .dark ? .white : .black,
             by: colorScheme == .dark ? 0.35 : 0.34
         )
     }
 
     private var statusControlInk: Color {
-        isSelected ? .white : annotation.status.tint
+        isEmphasizedSelection ? .white : annotation.status.tint
     }
 
     private var statusMenu: some View {
@@ -399,29 +524,29 @@ private struct AnnotationListItem: View {
         } label: {
             if documentManager.updatingAnnotationIDs.contains(annotation.id) {
                 ProgressView().controlSize(.mini)
-                    .frame(height: 24)
+                    .frame(width: 26, height: 26)
             } else {
                 Image(annotation.status.iconName, bundle: .module)
                     .resizable()
                     .scaledToFit()
                     .frame(width: 13, height: 13)
                     .foregroundStyle(statusControlInk)
-                    .frame(width: 22, height: 22)
+                    .frame(width: 26, height: 26)
                     .background(
-                        RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
                             .fill(hoveringStatus
-                                ? (isSelected ? Color.white.opacity(0.16) : Color.primary.opacity(0.07))
+                                ? (isEmphasizedSelection ? Color.white.opacity(0.16) : Color.primary.opacity(0.07))
                                 : Color.clear)
                     )
                     .contentShape(Rectangle())
                     .background(MenuAnchorView(view: $statusAnchorView))
-                    .accessibilityLabel(annotation.status.displayName)
             }
         }
         .buttonStyle(.plain)
         .fixedSize()
         .onHover { hoveringStatus = $0 }
         .disabled(statusUpdateIsInProgress)
+        .accessibilityLabel("Status: \(annotation.status.displayName)")
         .help("\(annotation.status.displayName): \(annotation.status.help)")
     }
 
@@ -485,6 +610,14 @@ private struct AnnotationListItem: View {
 
     private var markedText: String? {
         annotation.markedText?.trimmedNilIfEmpty
+    }
+
+    private var shortDateText: String? {
+        guard let date = annotation.createdDate,
+              Calendar.current.component(.year, from: date) >= 1980 else {
+            return nil
+        }
+        return date.formatted(.dateTime.month(.abbreviated).day())
     }
 
     private var statusUpdateIsInProgress: Bool {

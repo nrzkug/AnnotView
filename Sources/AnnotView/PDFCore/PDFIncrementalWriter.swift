@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 /// Appends PDF Incremental Updates (ISO 32000-1 §7.5.6) to an existing `PDFDocumentStore`
@@ -139,16 +140,17 @@ final class PDFIncrementalWriter {
 
     // MARK: - Build Incremental PDF
 
-    /// Produces the complete PDF bytes consisting of the original PDF followed by the
-    /// appended incremental update section.
-    func buildData() -> Data {
+    /// Produces only the incremental update bytes to append after `store.rawData`,
+    /// or empty `Data` when no objects were modified.
+    func buildIncrementalSuffix() -> Data {
         guard !updatedObjects.isEmpty else {
-            return store.rawData
+            return Data()
         }
 
-        var output = store.rawData
-        if let lastByte = output.last, lastByte != 0x0A && lastByte != 0x0D {
-            output.append(0x0A)
+        let baseCount = store.rawData.count
+        var suffix = Data()
+        if let lastByte = store.rawData.last, lastByte != 0x0A && lastByte != 0x0D {
+            suffix.append(0x0A)
         }
 
         let headerOffset = store.pdfHeaderOffset
@@ -158,7 +160,7 @@ final class PDFIncrementalWriter {
 
         for objNum in sortedObjNums {
             guard let entry = updatedObjects[objNum] else { continue }
-            let offset = output.count - headerOffset
+            let offset = (baseCount + suffix.count) - headerOffset
             writtenOffsets.append((objNum: objNum, genNum: entry.genNum, offset: offset))
 
             let preparedObject = prepareForSerialization(
@@ -171,47 +173,115 @@ final class PDFIncrementalWriter {
                 genNum: entry.genNum,
                 object: preparedObject
             )
-            output.append(serialized)
-            if output.last != 0x0A {
-                output.append(0x0A)
+            suffix.append(serialized)
+            if suffix.last != 0x0A {
+                suffix.append(0x0A)
             }
         }
 
         if store.usesXRefStreams {
-            appendXRefStream(to: &output, entries: writtenOffsets, headerOffset: headerOffset)
+            appendXRefStream(to: &suffix, baseCount: baseCount, entries: writtenOffsets, headerOffset: headerOffset)
         } else {
-            appendClassicXRef(to: &output, entries: writtenOffsets, headerOffset: headerOffset)
+            appendClassicXRef(to: &suffix, baseCount: baseCount, entries: writtenOffsets, headerOffset: headerOffset)
         }
 
+        return suffix
+    }
+
+    /// Produces the complete PDF bytes consisting of the original PDF followed by the
+    /// appended incremental update section.
+    func buildData() -> Data {
+        let suffix = buildIncrementalSuffix()
+        guard !suffix.isEmpty else {
+            return store.rawData
+        }
+        var output = Data(capacity: store.rawData.count + suffix.count)
+        output.append(store.rawData)
+        output.append(suffix)
         return output
     }
 
-    /// Writes `data` atomically to `destinationURL` via a unique temporary directory and
-    /// `FileManager.replaceItemAt`.
+    /// Appends the incremental update onto a copy-on-write clone of `destinationURL`
+    /// when the on-disk size matches `store.rawData`, falling back to full atomic write otherwise.
+    /// Returns the appended incremental suffix bytes (empty if there are no pending changes).
+    @discardableResult
+    func saveIncrementally(to destinationURL: URL) throws -> Data {
+        let suffix = buildIncrementalSuffix()
+        guard !suffix.isEmpty else { return Data() }
+
+        let fileManager = FileManager.default
+        let target = destinationURL.resolvingSymlinksInPath()
+        var st = Darwin.stat()
+        if stat(target.path, &st) == 0,
+           Int64(st.st_size) == Int64(store.rawData.count),
+           let tempDir = try? Self.makeReplacementDirectory(for: target, fileManager: fileManager) {
+            defer { try? fileManager.removeItem(at: tempDir) }
+            let tempFileURL = tempDir.appendingPathComponent("output.pdf")
+            do {
+                try fileManager.copyItem(at: target, to: tempFileURL)
+                let handle = try FileHandle(forUpdating: tempFileURL)
+                do {
+                    try handle.seekToEnd()
+                    try handle.write(contentsOf: suffix)
+                    try handle.close()
+                } catch {
+                    try? handle.close()
+                    throw error
+                }
+                let expectedSize = Int64(store.rawData.count + suffix.count)
+                let writtenSize = (try? fileManager.attributesOfItem(atPath: tempFileURL.path)[.size] as? NSNumber)?.int64Value ?? 0
+                if writtenSize == expectedSize {
+                    _ = try fileManager.replaceItemAt(target, withItemAt: tempFileURL)
+                    return suffix
+                }
+            } catch {
+                // Fall through to full atomic write below.
+            }
+        }
+
+        try Self.saveAtomically(buildData(), to: destinationURL)
+        return suffix
+    }
+
+    /// Writes `data` atomically to `destinationURL` via a same-volume item replacement
+    /// directory (falling back to the system temporary directory) and `FileManager.replaceItemAt`.
     static func saveAtomically(_ data: Data, to destinationURL: URL) throws {
         guard !data.isEmpty else {
             throw WriterError.emptyOutput
         }
         let fileManager = FileManager.default
-        let tempDir = fileManager.temporaryDirectory
-            .appendingPathComponent("AnnotView-\(UUID().uuidString)", isDirectory: true)
-        try fileManager.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        let target = destinationURL.resolvingSymlinksInPath()
+        let tempDir = try makeReplacementDirectory(for: target, fileManager: fileManager)
         defer { try? fileManager.removeItem(at: tempDir) }
 
         let tempFileURL = tempDir.appendingPathComponent("output.pdf")
-        try data.write(to: tempFileURL, options: .atomic)
+        try data.write(to: tempFileURL)
 
         let writtenSize = (try? fileManager.attributesOfItem(atPath: tempFileURL.path)[.size] as? Int) ?? 0
         guard writtenSize > 0 else {
             throw WriterError.emptyOutput
         }
 
-        let target = destinationURL.resolvingSymlinksInPath()
         do {
             _ = try fileManager.replaceItemAt(target, withItemAt: tempFileURL)
         } catch {
             try data.write(to: target, options: .atomic)
         }
+    }
+
+    private static func makeReplacementDirectory(for target: URL, fileManager: FileManager) throws -> URL {
+        if let replacementDir = try? fileManager.url(
+            for: .itemReplacementDirectory,
+            in: .userDomainMask,
+            appropriateFor: target,
+            create: true
+        ) {
+            return replacementDir
+        }
+        let fallbackDir = fileManager.temporaryDirectory
+            .appendingPathComponent("AnnotView-\(UUID().uuidString)", isDirectory: true)
+        try fileManager.createDirectory(at: fallbackDir, withIntermediateDirectories: true)
+        return fallbackDir
     }
 
     // MARK: - Encryption & Stream Length Preparation
@@ -266,10 +336,11 @@ final class PDFIncrementalWriter {
 
     private func appendClassicXRef(
         to output: inout Data,
+        baseCount: Int,
         entries: [(objNum: Int, genNum: Int, offset: Int)],
         headerOffset: Int
     ) {
-        let xrefOffset = output.count - headerOffset
+        let xrefOffset = (baseCount + output.count) - headerOffset
         let subsections = groupIntoSubsections(entries)
 
         var xrefText = "xref\n"
@@ -308,12 +379,13 @@ final class PDFIncrementalWriter {
 
     private func appendXRefStream(
         to output: inout Data,
+        baseCount: Int,
         entries: [(objNum: Int, genNum: Int, offset: Int)],
         headerOffset: Int
     ) {
         let xrefObjNum = nextObjNum
-        nextObjNum += 1
-        let xrefOffset = output.count - headerOffset
+        let nextAfterXRef = nextObjNum + 1
+        let xrefOffset = (baseCount + output.count) - headerOffset
 
         var allEntries = entries
         allEntries.append((objNum: xrefObjNum, genNum: 0, offset: xrefOffset))
@@ -340,7 +412,7 @@ final class PDFIncrementalWriter {
         }
 
         let oldSize = store.trailer["Size"]?.intValue ?? 0
-        let newSize = max(oldSize, max(nextObjNum, xrefObjNum + 1))
+        let newSize = max(oldSize, max(nextAfterXRef, xrefObjNum + 1))
 
         var xrefDict: [String: PDFObject] = [
             "Type": .name("XRef"),

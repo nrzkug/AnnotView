@@ -5,9 +5,10 @@ import Foundation
 /// actually produces in the user's documents (e.g. purple-blue sticky notes,
 /// purple Insert-Text carets), then adopt whatever color the user last picked.
 @MainActor
-final class AnnotationColorMemory {
+final class AnnotationColorMemory: ObservableObject {
     static let shared = AnnotationColorMemory()
 
+    @Published private(set) var revision = 0
     private let defaults: UserDefaults
 
     init(defaults: UserDefaults = .standard) {
@@ -30,6 +31,7 @@ final class AnnotationColorMemory {
             "\(color.red),\(color.green),\(color.blue),\(color.alpha)",
             forKey: key(for: kind)
         )
+        revision += 1
     }
 
     private func key(for kind: Annotation.Kind) -> String {

@@ -29,4 +29,17 @@ struct AppearanceSettingsTests {
         #expect(settings.appearance == .system)
         #expect(settings.appearance.colorScheme == nil)
     }
+
+    @Test @MainActor
+    func persistsDefaultAuthorName() throws {
+        let suiteName = "AppearanceSettingsTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let settings = AppearanceSettings(defaults: defaults, key: "testAppearance", authorKey: "testAuthor")
+        #expect(settings.defaultAuthorName == "")
+
+        settings.defaultAuthorName = "Alex Reviewer"
+        #expect(defaults.string(forKey: "testAuthor") == "Alex Reviewer")
+    }
 }

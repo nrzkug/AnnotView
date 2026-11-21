@@ -86,7 +86,7 @@ struct ReaderCommands: Commands {
         }
 
         CommandMenu("Annotate") {
-            Picker("Tool", selection: $chromeState.annotationTool) {
+            Picker("Tool", selection: $chromeState.annotationTool.animation()) {
                 ForEach(AnnotationTool.allCases, id: \.self) { tool in
                     Text(tool.label).tag(tool)
                 }

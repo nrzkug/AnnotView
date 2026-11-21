@@ -26,4 +26,9 @@ final class AnnotPDFDocument: NSDocument {
             await self.documentManager.open(url: url)
         }
     }
+
+    override func close() {
+        documentManager.close()
+        super.close()
+    }
 }

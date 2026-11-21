@@ -67,6 +67,7 @@ final class AnnotationPDFView: PDFView, @preconcurrency PDFPageOverlayViewProvid
     var onDeselectAnnotationRequest: (@MainActor () -> Void)?
     var lastAnnotationNavigationID = 0
     var lastSearchNavigationID = 0
+    var lastSearchResultsRevision = 0
     var lastZoomRequestID = 0
     private var suppressesMarkupOnMouseUp = false
     private var contextMenuAnnotation: Annotation?
@@ -137,8 +138,12 @@ final class AnnotationPDFView: PDFView, @preconcurrency PDFPageOverlayViewProvid
 
     var overlayAnnotations: [Int: [Annotation]] = [:] {
         didSet {
+            guard oldValue != overlayAnnotations else { return }
             for overlay in pageOverlayViews.allObjects {
-                overlay.annotations = overlayAnnotations[overlay.pageIndex] ?? []
+                let next = overlayAnnotations[overlay.pageIndex] ?? []
+                if overlay.annotations != next {
+                    overlay.annotations = next
+                }
             }
             reconcileAnnotationInteraction()
         }
@@ -211,20 +216,42 @@ final class AnnotationPDFView: PDFView, @preconcurrency PDFPageOverlayViewProvid
     }
 
     func cursor(at viewPoint: CGPoint) -> NSCursor {
+        let page = page(for: viewPoint, nearest: false)
+        let pagePoint = page.map { convert(viewPoint, to: $0) }
+        return cursor(
+            at: viewPoint,
+            page: page,
+            pagePoint: pagePoint,
+            precomputedTarget: nil,
+            hasPrecomputedTarget: false
+        )
+    }
+
+    private func cursor(
+        at viewPoint: CGPoint,
+        page: PDFPage?,
+        pagePoint: CGPoint?,
+        precomputedTarget: (annotation: Annotation, page: PDFPage)?,
+        hasPrecomputedTarget: Bool
+    ) -> NSCursor {
         if isWindowDragPoint(viewPoint) { return .arrow }
         // Text remains a text target even when it carries a highlight, link,
         // or other annotation. Do not let annotation hit testing win here.
-        if isOverText(at: viewPoint) { return .iBeam }
-        if annotationTarget(at: viewPoint) != nil { return .pointingHand }
+        if let page, let pagePoint, isOverText(on: page, at: pagePoint) { return .iBeam }
+        let target = hasPrecomputedTarget
+            ? precomputedTarget
+            : page.flatMap { p in pagePoint.flatMap { annotationTarget(on: p, at: $0) } }
+        if target != nil { return .pointingHand }
         if annotationTool == .note { return .crosshair }
-        if annotationTool == .insertText { return .iBeam }
         return .arrow
     }
 
     override func mouseMoved(with event: NSEvent) {
         let viewPoint = convert(event.locationInWindow, from: nil)
         guard visibleRect.contains(viewPoint) else { return }
-        let target = annotationTarget(at: viewPoint)
+        let page = page(for: viewPoint, nearest: false)
+        let pagePoint = page.map { convert(viewPoint, to: $0) }
+        let target = page.flatMap { p in pagePoint.flatMap { annotationTarget(on: p, at: $0) } }
         interactionController.updateHover(
             annotation: target?.annotation,
             page: target?.page,
@@ -236,7 +263,13 @@ final class AnnotationPDFView: PDFView, @preconcurrency PDFPageOverlayViewProvid
         )
         // PDFKit has tracking areas of its own. Reapply our policy on every
         // move, including moves between glyphs within the same tracking area.
-        cursor(at: viewPoint).set()
+        cursor(
+            at: viewPoint,
+            page: page,
+            pagePoint: pagePoint,
+            precomputedTarget: target,
+            hasPrecomputedTarget: true
+        ).set()
     }
 
     override func mouseExited(with event: NSEvent) {
@@ -305,17 +338,10 @@ final class AnnotationPDFView: PDFView, @preconcurrency PDFPageOverlayViewProvid
             popoverCoordinator.dismiss()
             onDeselectAnnotationRequest?()
             let rawPoint = convert(viewPoint, to: page)
-            let point = annotationTool == .insertText
-                ? insertionPoint(for: rawPoint, on: page)
-                : rawPoint
-            let location = PDFPagePoint(
-                pageIndex: pageIndex,
-                point: point
-            )
             if annotationTool == .note {
-                onCreateNoteRequest?(location)
-            } else {
-                onCreateInsertTextRequest?(location)
+                onCreateNoteRequest?(PDFPagePoint(pageIndex: pageIndex, point: rawPoint))
+            } else if let point = insertionPoint(for: rawPoint, on: page) {
+                onCreateInsertTextRequest?(PDFPagePoint(pageIndex: pageIndex, point: point))
             }
             return
         }
@@ -427,11 +453,14 @@ final class AnnotationPDFView: PDFView, @preconcurrency PDFPageOverlayViewProvid
             addMenuItem("Add Highlight", action: #selector(addHighlightFromMenu(_:)), to: menu)
             addMenuItem("Add Underline", action: #selector(addUnderlineFromMenu(_:)), to: menu)
             addMenuItem("Add Strikethrough", action: #selector(addStrikeoutFromMenu(_:)), to: menu)
-        } else if contextMenuPagePoint != nil {
+        } else if let contextMenuPagePoint {
             // No selection: offer point-based annotations at the click location.
             if !menu.items.isEmpty { menu.addItem(.separator()) }
             addMenuItem("Add Sticky Note", action: #selector(addNoteFromMenu(_:)), to: menu)
-            addMenuItem("Add Insert Text", action: #selector(addInsertTextFromMenu(_:)), to: menu)
+            if let page = document?.page(at: contextMenuPagePoint.pageIndex),
+               insertionPoint(for: contextMenuPagePoint.point, on: page) != nil {
+                addMenuItem("Add Insert Text", action: #selector(addInsertTextFromMenu(_:)), to: menu)
+            }
         }
         return menu
     }
@@ -452,17 +481,15 @@ final class AnnotationPDFView: PDFView, @preconcurrency PDFPageOverlayViewProvid
     }
 
     @objc private func addInsertTextFromMenu(_ sender: Any?) {
-        guard let location = contextMenuPagePoint else { return }
-        if let page = document?.page(at: location.pageIndex) {
-            onCreateInsertTextRequest?(
-                PDFPagePoint(
-                    pageIndex: location.pageIndex,
-                    point: insertionPoint(for: location.point, on: page)
-                )
+        guard let location = contextMenuPagePoint,
+              let page = document?.page(at: location.pageIndex),
+              let point = insertionPoint(for: location.point, on: page) else { return }
+        onCreateInsertTextRequest?(
+            PDFPagePoint(
+                pageIndex: location.pageIndex,
+                point: point
             )
-        } else {
-            onCreateInsertTextRequest?(location)
-        }
+        )
     }
 
     func markupSelection() -> PDFMarkupSelection? {
@@ -546,6 +573,60 @@ final class AnnotationPDFView: PDFView, @preconcurrency PDFPageOverlayViewProvid
 
     func flashTextRange(for annotation: Annotation) {
         interactionController.flash(annotation)
+        pulseFocusHalo(for: annotation)
+    }
+
+    private func pulseFocusHalo(for annotation: Annotation) {
+        guard !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion,
+              let page = document?.page(at: annotation.pageIndex),
+              let documentView else { return }
+
+        documentView.wantsLayer = true
+        let viewRect = convert(annotation.bounds, from: page)
+        var targetRect = documentView.convert(viewRect, from: self).insetBy(dx: -6, dy: -6)
+        if targetRect.width < 24 {
+            targetRect = targetRect.insetBy(dx: -(24 - targetRect.width) / 2, dy: 0)
+        }
+        if targetRect.height < 24 {
+            targetRect = targetRect.insetBy(dx: 0, dy: -(24 - targetRect.height) / 2)
+        }
+
+        let halo = CAShapeLayer()
+        halo.bounds = CGRect(origin: .zero, size: targetRect.size)
+        halo.position = CGPoint(x: targetRect.midX, y: targetRect.midY)
+        halo.path = CGPath(roundedRect: halo.bounds, cornerWidth: 6, cornerHeight: 6, transform: nil)
+        halo.fillColor = NSColor.clear.cgColor
+        halo.strokeColor = NSColor.controlAccentColor.withAlphaComponent(0.85).cgColor
+        halo.lineWidth = 2.5
+        halo.opacity = 0
+
+        documentView.layer?.addSublayer(halo)
+
+        let scale = CABasicAnimation(keyPath: "transform.scale")
+        scale.fromValue = 1.0
+        scale.toValue = 1.08
+
+        let opacity = CABasicAnimation(keyPath: "opacity")
+        opacity.fromValue = 0.9
+        opacity.toValue = 0.0
+
+        let lineWidth = CABasicAnimation(keyPath: "lineWidth")
+        lineWidth.fromValue = 2.5
+        lineWidth.toValue = 1.0
+
+        let group = CAAnimationGroup()
+        group.animations = [scale, opacity, lineWidth]
+        group.duration = 0.45
+        group.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        group.fillMode = .forwards
+        group.isRemovedOnCompletion = true
+
+        CATransaction.begin()
+        CATransaction.setCompletionBlock { [weak halo] in
+            halo?.removeFromSuperlayer()
+        }
+        halo.add(group, forKey: "focusPulse")
+        CATransaction.commit()
     }
 
     func center(
@@ -604,31 +685,78 @@ final class AnnotationPDFView: PDFView, @preconcurrency PDFPageOverlayViewProvid
     /// cursor: the exact click height within the line is ignored, and descenders
     /// must not pull the marker down. Character boxes share one baseline, so the
     /// line baseline is the highest character bottom found along the line.
-    private func insertionPoint(for pagePoint: CGPoint, on page: PDFPage) -> CGPoint {
-        let characterIndex = page.characterIndex(at: pagePoint)
-        guard characterIndex != NSNotFound else { return pagePoint }
-        let anchor = page.characterBounds(at: characterIndex)
-        guard anchor.width > 0, anchor.height > 0 else { return pagePoint }
+    func insertionPoint(for pagePoint: CGPoint, on page: PDFPage) -> CGPoint? {
+        if let anchorIndex = resolvedCharacterIndex(for: pagePoint, on: page) {
+            let anchor = page.characterBounds(at: anchorIndex)
+            let baseline = visualBaseline(anchoredAt: anchorIndex, anchor: anchor, on: page)
+            return CGPoint(x: pagePoint.x, y: baseline)
+        }
+        guard let lineSelection = page.selectionForLine(at: pagePoint) else { return nil }
+        let lineBounds = lineSelection.bounds(for: page)
+        guard lineBounds.width > 0, lineBounds.height > 0,
+              lineBounds.insetBy(dx: -4, dy: -4).contains(pagePoint) else {
+            return nil
+        }
 
+        let probeY = lineBounds.midY
+        let clampedX = min(max(pagePoint.x, lineBounds.minX), lineBounds.maxX)
+        let maxRadius = max(24, lineBounds.width)
+        var distance: CGFloat = 0
+        while distance <= maxRadius {
+            let candidates = distance == 0 ? [clampedX] : [clampedX - distance, clampedX + distance]
+            for x in candidates {
+                let probePoint = CGPoint(x: min(max(x, lineBounds.minX), lineBounds.maxX), y: probeY)
+                let index = page.characterIndex(at: probePoint)
+                guard index != NSNotFound else { continue }
+                let anchor = page.characterBounds(at: index)
+                guard anchor.width > 0, anchor.height > 0 else { continue }
+                let baseline = visualBaseline(anchoredAt: index, anchor: anchor, on: page)
+                return CGPoint(x: pagePoint.x, y: baseline)
+            }
+            distance += 6
+        }
+        return CGPoint(x: pagePoint.x, y: lineBounds.minY)
+    }
+
+    private func resolvedCharacterIndex(for pagePoint: CGPoint, on page: PDFPage) -> Int? {
+        let index = page.characterIndex(at: pagePoint)
+        guard index != NSNotFound else { return nil }
+        let bounds = page.characterBounds(at: index)
+        guard bounds.width > 0, bounds.height > 0,
+              bounds.insetBy(dx: -4, dy: -4).contains(pagePoint) else {
+            return nil
+        }
+        return index
+    }
+
+    private func visualBaseline(anchoredAt characterIndex: Int, anchor: CGRect, on page: PDFPage) -> CGFloat {
         let text = page.string ?? ""
-        var baseline = anchor.minY
         let span = 80
         let firstIndex = max(0, characterIndex - span)
         let lastIndex = min(max(0, text.count - 1), characterIndex + span)
+        var samples: [(minY: CGFloat, height: CGFloat)] = []
+        var maxHeight: CGFloat = 0
+
         for index in firstIndex...lastIndex {
             let bounds = page.characterBounds(at: index)
             guard bounds.width > 0, bounds.height > 0 else { continue }
             // Keep only characters on the same visual line as the anchor.
             let verticalOverlap = min(anchor.maxY, bounds.maxY) - max(anchor.minY, bounds.minY)
             guard verticalOverlap > 0 else { continue }
-            baseline = max(baseline, bounds.minY)
+            samples.append((bounds.minY, bounds.height))
+            maxHeight = max(maxHeight, bounds.height)
         }
-        return CGPoint(x: pagePoint.x, y: baseline)
+
+        let fullBodyMinYs = samples
+            .filter { $0.height >= maxHeight * 0.55 }
+            .map(\.minY)
+            .sorted()
+        guard !fullBodyMinYs.isEmpty else { return anchor.minY }
+        let index = min(fullBodyMinYs.count - 1, (fullBodyMinYs.count * 3) / 4)
+        return fullBodyMinYs[index]
     }
 
-    private func isOverText(at viewPoint: CGPoint) -> Bool {
-        guard let page = page(for: viewPoint, nearest: false) else { return false }
-        let pagePoint = convert(viewPoint, to: page)
+    private func isOverText(on page: PDFPage, at pagePoint: CGPoint) -> Bool {
         let characterIndex = page.characterIndex(at: pagePoint)
         if characterIndex != NSNotFound && page.characterBounds(at: characterIndex).insetBy(dx: -0.5, dy: -0.5).contains(pagePoint) {
             return true
@@ -649,10 +777,17 @@ final class AnnotationPDFView: PDFView, @preconcurrency PDFPageOverlayViewProvid
     }
 
     private func annotationTarget(at viewPoint: CGPoint) -> (annotation: Annotation, page: PDFPage)? {
-        guard let page = page(for: viewPoint, nearest: false),
-              let document,
-              let pageIndex = document.validPageIndex(for: page) else { return nil }
+        guard let page = page(for: viewPoint, nearest: false) else { return nil }
         let pagePoint = convert(viewPoint, to: page)
+        return annotationTarget(on: page, at: pagePoint)
+    }
+
+    private func annotationTarget(
+        on page: PDFPage,
+        at pagePoint: CGPoint
+    ) -> (annotation: Annotation, page: PDFPage)? {
+        guard let document,
+              let pageIndex = document.validPageIndex(for: page) else { return nil }
         guard let annotation = overlayAnnotations[pageIndex]?.last(where: {
             AnnotationOverlayRenderer.contains(pagePoint, in: $0)
         }) else { return nil }

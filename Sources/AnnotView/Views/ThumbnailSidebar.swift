@@ -29,15 +29,16 @@ struct ThumbnailSidebar: View {
             // Keep the intrinsic-width control centered as the sidebar resizes.
             .fixedSize(horizontal: true, vertical: false)
             .frame(maxWidth: .infinity)
+            .frame(height: 40)
             // Keep both segments in place when the document has no outline.
             .padding(.horizontal, 10)
-            .padding(.vertical, 8)
-
             .onChange(of: hasOutline) { _, hasOutline in
                 if !hasOutline {
                     mode = .thumbnails
                 }
             }
+
+            Divider()
 
             if let document = documentManager.document, mode == .thumbnails {
                 List(selection: $documentManager.selectedPageIndex) {
@@ -80,6 +81,11 @@ private struct PageThumbnailItem: View {
     // throws an AppKit constraint exception on document open (macOS 26).
     private static let mediaHeight: CGFloat = 132
 
+    private var pendingCount: Int {
+        (documentManager.annotationsByPage[pageIndex] ?? [])
+            .reduce(0) { $0 + ($1.status == .none ? 1 : 0) }
+    }
+
     var body: some View {
         VStack(spacing: 6) {
             Group {
@@ -101,13 +107,26 @@ private struct PageThumbnailItem: View {
             }
             .frame(height: Self.mediaHeight)
             .frame(maxWidth: .infinity)
-            Text("Page \(pageIndex + 1)")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            HStack(spacing: 5) {
+                Text("Page \(pageIndex + 1)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if pendingCount > 0 {
+                    Text("\(pendingCount)")
+                        .font(.system(size: 10, weight: .semibold))
+                        .monospacedDigit()
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 5)
+                        .frame(minWidth: 16)
+                        .frame(height: 15)
+                        .background(Color.orange, in: Capsule())
+                        .accessibilityLabel("\(pendingCount) pending annotations")
+                }
+            }
         }
         .padding(.vertical, 6)
         .tag(pageIndex)
-        .task(id: "\(pageIndex)-\(documentManager.thumbnailRevision)") {
+        .task(id: "\(pageIndex)-\(documentManager.thumbnailRevision(for: pageIndex))") {
             thumbnail = await documentManager.renderPageAsync(pageIndex: pageIndex, scale: 0.5)
         }
     }

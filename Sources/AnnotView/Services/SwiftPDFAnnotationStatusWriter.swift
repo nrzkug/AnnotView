@@ -3,6 +3,12 @@ import Foundation
 /// Pure-Swift PDF annotation review-status writer using incremental updates.
 /// Maintains 100% behavioral parity with `MuPDFAnnotationStatusWriter`.
 actor SwiftPDFAnnotationStatusWriter: AnnotationStatusUpdating {
+    private let storeCache: PDFDocumentStoreCache
+
+    init(storeCache: PDFDocumentStoreCache = .shared) {
+        self.storeCache = storeCache
+    }
+
     enum StatusWriterError: LocalizedError {
         case annotationNotFound(String)
 
@@ -20,7 +26,7 @@ actor SwiftPDFAnnotationStatusWriter: AnnotationStatusUpdating {
     ) async throws {
         guard !updates.isEmpty else { return }
 
-        let store = try PDFDocumentStore(url: documentURL)
+        let store = try await storeCache.store(for: documentURL)
         let writer = PDFIncrementalWriter(store: store)
         let pages = store.pages()
 
@@ -36,8 +42,10 @@ actor SwiftPDFAnnotationStatusWriter: AnnotationStatusUpdating {
             writer.setObject(.dict(dict), number: found.objNum, generation: found.genNum)
         }
 
-        let outputData = writer.buildData()
-        try PDFIncrementalWriter.saveAtomically(outputData, to: documentURL)
+        let suffix = try writer.saveIncrementally(to: documentURL)
+        if !suffix.isEmpty {
+            await storeCache.update(appending: suffix, to: store, for: documentURL)
+        }
     }
 
     private func findAnnotation(

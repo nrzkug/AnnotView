@@ -7,6 +7,8 @@ struct ReaderContentSplitView<Sidebar: View, Main: View, Inspector: View, Tools:
     @Binding var isSidebarVisible: Bool
     @Binding var isInspectorVisible: Bool
     @Binding var chromeHeight: CGFloat
+    let annotationTool: AnnotationTool
+    let colorRevision: Int
     @ViewBuilder let sidebar: () -> Sidebar
     @ViewBuilder let main: () -> Main
     @ViewBuilder let inspector: () -> Inspector
@@ -19,6 +21,7 @@ struct ReaderContentSplitView<Sidebar: View, Main: View, Inspector: View, Tools:
         return ReaderSplitViewController(
             sidebar: sidebar(), main: main(), inspector: inspector(), tools: tools(),
             sidebarVisible: isSidebarVisible, inspectorVisible: isInspectorVisible,
+            annotationTool: annotationTool, colorRevision: colorRevision,
             onSidebarChange: { sidebarVisibility.wrappedValue = $0 },
             onInspectorChange: { inspectorVisibility.wrappedValue = $0 },
             onChromeHeightChange: { height.wrappedValue = $0 }
@@ -30,7 +33,8 @@ struct ReaderContentSplitView<Sidebar: View, Main: View, Inspector: View, Tools:
     ) {
         controller.update(
             sidebar: sidebar(), main: main(), inspector: inspector(), tools: tools(),
-            sidebarVisible: isSidebarVisible, inspectorVisible: isInspectorVisible
+            sidebarVisible: isSidebarVisible, inspectorVisible: isInspectorVisible,
+            annotationTool: annotationTool, colorRevision: colorRevision
         )
     }
 
@@ -91,11 +95,17 @@ final class ReaderSplitViewController<Sidebar: View, Main: View, Inspector: View
     private let onChromeHeightChange: (CGFloat) -> Void
     private var observations: [NSKeyValueObservation] = []
     private var actions: [ReaderToolbarAction] = []
+    private var annotationTool: AnnotationTool
+    private var colorRevision: Int
+    private var colorToolbarItem: NSMenuToolbarItem?
+    private let colorMenuTarget = ToolbarColorMenuTarget()
     private var isSyncing = false
     private var didInstallChrome = false
     private var didSetInitialWidths = false
+    private var didAutoCollapseForNarrowWidth = false
     private var reportedChromeHeight: CGFloat?
 
+    private var toolColorID: NSToolbarItem.Identifier { .init("annotview.annotationColor") }
     private var toolsID: NSToolbarItem.Identifier { .init("annotview.annotationTools") }
     private var sidebarID: NSToolbarItem.Identifier { .init("annotview.sidebar") }
     private var inspectorID: NSToolbarItem.Identifier { .init("annotview.inspector") }
@@ -103,6 +113,7 @@ final class ReaderSplitViewController<Sidebar: View, Main: View, Inspector: View
     init(
         sidebar: Sidebar, main: Main, inspector: Inspector, tools: Tools,
         sidebarVisible: Bool, inspectorVisible: Bool,
+        annotationTool: AnnotationTool, colorRevision: Int,
         onSidebarChange: @escaping (Bool) -> Void,
         onInspectorChange: @escaping (Bool) -> Void,
         onChromeHeightChange: @escaping (CGFloat) -> Void
@@ -113,23 +124,25 @@ final class ReaderSplitViewController<Sidebar: View, Main: View, Inspector: View
         toolsRoot = tools
         sidebarItem = NSSplitViewItem(sidebarWithViewController: sidebarHost)
         inspectorItem = NSSplitViewItem(inspectorWithViewController: inspectorHost)
+        self.annotationTool = annotationTool
+        self.colorRevision = colorRevision
         self.onSidebarChange = onSidebarChange
         self.onInspectorChange = onInspectorChange
         self.onChromeHeightChange = onChromeHeightChange
         super.init(nibName: nil, bundle: nil)
 
         sidebarItem.canCollapse = true
-        sidebarItem.minimumThickness = 220
+        sidebarItem.minimumThickness = 180
         sidebarItem.maximumThickness = 360
         sidebarItem.holdingPriority = .init(260)
         sidebarItem.isCollapsed = !sidebarVisible
 
         let mainItem = NSSplitViewItem(viewController: mainHost)
-        mainItem.minimumThickness = 420
+        mainItem.minimumThickness = 360
         mainItem.allowsFullHeightLayout = true
 
         inspectorItem.canCollapse = true
-        inspectorItem.minimumThickness = 300
+        inspectorItem.minimumThickness = 260
         inspectorItem.maximumThickness = 720
         inspectorItem.holdingPriority = .init(260)
         inspectorItem.isCollapsed = !inspectorVisible
@@ -157,13 +170,16 @@ final class ReaderSplitViewController<Sidebar: View, Main: View, Inspector: View
 
     func update(
         sidebar: Sidebar, main: Main, inspector: Inspector, tools: Tools,
-        sidebarVisible: Bool, inspectorVisible: Bool
+        sidebarVisible: Bool, inspectorVisible: Bool,
+        annotationTool: AnnotationTool, colorRevision: Int
     ) {
-        sidebarHost.host.rootView = sidebar
-        mainHost.host.rootView = main
-        inspectorHost.host.rootView = inspector
-        toolsRoot = tools
-        toolsHost?.rootView = tools
+        if self.annotationTool != annotationTool || self.colorRevision != colorRevision {
+            self.annotationTool = annotationTool
+            self.colorRevision = colorRevision
+            DispatchQueue.main.async { [weak self] in
+                self?.refreshColorToolbarItem()
+            }
+        }
         isSyncing = true
         setCollapsed(!sidebarVisible, for: sidebarItem)
         setCollapsed(!inspectorVisible, for: inspectorItem)
@@ -227,10 +243,27 @@ final class ReaderSplitViewController<Sidebar: View, Main: View, Inspector: View
             host.autoresizingMask = [.width, .height]
             host.frame = contentView.bounds
         }
-        guard let height = view.window?.contentView?.safeAreaInsets.top,
-              reportedChromeHeight != height else { return }
-        reportedChromeHeight = height
-        DispatchQueue.main.async { [weak self] in self?.onChromeHeightChange(height) }
+        guard let height = view.window?.contentView?.safeAreaInsets.top else { return }
+        if reportedChromeHeight != height {
+            reportedChromeHeight = height
+            DispatchQueue.main.async { [weak self] in self?.onChromeHeightChange(height) }
+        }
+        let width = splitView.bounds.width
+        if width > 0 && width < 860,
+           !sidebarItem.isCollapsed,
+           !inspectorItem.isCollapsed,
+           !didAutoCollapseForNarrowWidth {
+            didAutoCollapseForNarrowWidth = true
+            DispatchQueue.main.async { [weak self] in
+                guard let self,
+                      self.splitView.bounds.width < 860,
+                      !self.sidebarItem.isCollapsed,
+                      !self.inspectorItem.isCollapsed else { return }
+                self.onSidebarChange(false)
+            }
+        } else if width >= 900 {
+            didAutoCollapseForNarrowWidth = false
+        }
     }
 
     override func splitViewDidResizeSubviews(_ notification: Notification) {
@@ -246,7 +279,7 @@ final class ReaderSplitViewController<Sidebar: View, Main: View, Inspector: View
     }
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [sidebarID, .sidebarTrackingSeparator, .flexibleSpace, toolsID, inspectorID]
+        [sidebarID, .sidebarTrackingSeparator, .flexibleSpace, toolColorID, toolsID, inspectorID]
     }
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
@@ -262,6 +295,15 @@ final class ReaderSplitViewController<Sidebar: View, Main: View, Inspector: View
                 identifier: identifier, splitView: splitView,
                 dividerIndex: identifier == .sidebarTrackingSeparator ? 0 : 1
             )
+        }
+        if identifier == toolColorID {
+            let item = NSMenuToolbarItem(itemIdentifier: identifier)
+            item.isBordered = true
+            item.showsIndicator = false
+            item.label = "Annotation Color"
+            colorToolbarItem = item
+            refreshColorToolbarItem()
+            return item
         }
         let item = NSToolbarItem(itemIdentifier: identifier)
         item.isBordered = identifier != toolsID
@@ -283,15 +325,91 @@ final class ReaderSplitViewController<Sidebar: View, Main: View, Inspector: View
             }
         }
         actions.append(action)
+        let label = isSidebar ? "Pages and Outline" : "Annotations"
         let icon = Bundle.module.image(forResource: isSidebar ? "panel-left" : "panel-right")
         icon?.size = NSSize(width: 19, height: 19)
         icon?.isTemplate = true
         item.image = icon
-        item.label = isSidebar ? "Pages and Outline" : "Annotations"
+        item.label = label
         item.toolTip = isSidebar ? "Show or hide pages and outline" : "Show or hide annotations inspector"
         item.target = action
         item.action = #selector(ReaderToolbarAction.fire)
         item.isBordered = true
         return item
+    }
+
+    private func refreshColorToolbarItem() {
+        guard let item = colorToolbarItem else { return }
+        guard let kind = annotationTool.annotationKind else {
+            item.isHidden = true
+            return
+        }
+        item.isHidden = false
+        let current = AnnotationColorMemory.shared.color(for: kind)
+        item.image = Self.swatchImage(for: current, diameter: 14)
+        item.toolTip = "Choose \(annotationTool.label.lowercased()) color"
+
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        colorMenuTarget.onSelect = { presetColor in
+            let alpha: CGFloat = kind == .highlight ? 0.4 : 1.0
+            let next = Annotation.Color(
+                red: presetColor.red,
+                green: presetColor.green,
+                blue: presetColor.blue,
+                alpha: alpha
+            )
+            AnnotationColorMemory.shared.set(next, for: kind)
+        }
+        for preset in ToolbarColorMenuTarget.presets {
+            let menuItem = NSMenuItem(
+                title: preset.name,
+                action: #selector(ToolbarColorMenuTarget.select(_:)),
+                keyEquivalent: ""
+            )
+            menuItem.target = colorMenuTarget
+            menuItem.representedObject = preset.color
+            menuItem.image = Self.swatchImage(for: preset.color, diameter: 12)
+            let matches = abs(current.red - preset.color.red) < 0.02
+                && abs(current.green - preset.color.green) < 0.02
+                && abs(current.blue - preset.color.blue) < 0.02
+            menuItem.state = matches ? .on : .off
+            menu.addItem(menuItem)
+        }
+        item.menu = menu
+    }
+
+    private static func swatchImage(for color: Annotation.Color, diameter: CGFloat) -> NSImage {
+        let size = NSSize(width: diameter, height: diameter)
+        let image = NSImage(size: size)
+        image.lockFocus()
+        let rect = NSRect(origin: .zero, size: size).insetBy(dx: 0.5, dy: 0.5)
+        let path = NSBezierPath(ovalIn: rect)
+        NSColor(red: color.red, green: color.green, blue: color.blue, alpha: 1).setFill()
+        path.fill()
+        NSColor.labelColor.withAlphaComponent(0.22).setStroke()
+        path.lineWidth = 1
+        path.stroke()
+        image.unlockFocus()
+        image.isTemplate = false
+        return image
+    }
+
+}
+
+private final class ToolbarColorMenuTarget: NSObject {
+    static let presets: [(name: String, color: Annotation.Color)] = [
+        ("Yellow", Annotation.Color(red: 1, green: 0.819611, blue: 0, alpha: 1)),
+        ("Green", Annotation.Color(red: 0.243, green: 0.725, blue: 0.353, alpha: 1)),
+        ("Red", Annotation.Color(red: 0.972549, green: 0.392151, blue: 0.392151, alpha: 1)),
+        ("Purple", Annotation.Color(red: 0.588242, green: 0.262741, blue: 0.988235, alpha: 1)),
+        ("Blue", Annotation.Color(red: 0.0, green: 0.478, blue: 1.0, alpha: 1)),
+    ]
+
+    var onSelect: ((Annotation.Color) -> Void)?
+
+    @objc func select(_ sender: NSMenuItem) {
+        guard let color = sender.representedObject as? Annotation.Color else { return }
+        onSelect?(color)
     }
 }

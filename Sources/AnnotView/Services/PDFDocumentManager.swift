@@ -3,70 +3,6 @@ import PDFKit
 
 @MainActor
 final class PDFDocumentManager: ObservableObject {
-    private struct AnnotationHistoryOperation {
-        enum Mutation {
-            case delete(snapshots: [Annotation], sourceIDs: [String])
-            case restore(snapshots: [Annotation])
-            case update(sourceID: String, value: Annotation, inverse: Annotation)
-            case move(sourceID: String, rect: CGRect, inverseRect: CGRect)
-        }
-
-        let actionName: String
-        let mutation: Mutation
-
-        func remappingSourceIDs(_ map: [String: String]) -> AnnotationHistoryOperation {
-            guard !map.isEmpty else { return self }
-            func remapAnnotation(_ item: Annotation) -> Annotation {
-                var copy = item
-                if let id = copy.sourceID, let next = map[id] { copy.sourceID = next }
-                if let id = copy.statusTargetSourceID, let next = map[id] { copy.statusTargetSourceID = next }
-                if let id = copy.inReplyToSourceID, let next = map[id] { copy.inReplyToSourceID = next }
-                return copy
-            }
-            let nextMutation: Mutation = switch mutation {
-            case let .delete(snapshots, sourceIDs):
-                .delete(
-                    snapshots: snapshots.map(remapAnnotation),
-                    sourceIDs: {
-                        var seen = Set<String>()
-                        return sourceIDs.map { map[$0] ?? $0 }.filter { seen.insert($0).inserted }
-                    }()
-                )
-            case let .restore(snapshots):
-                .restore(snapshots: snapshots.map(remapAnnotation))
-            case let .update(sourceID, value, inverse):
-                .update(
-                    sourceID: map[sourceID] ?? sourceID,
-                    value: remapAnnotation(value),
-                    inverse: remapAnnotation(inverse)
-                )
-            case let .move(sourceID, rect, inverseRect):
-                .move(
-                    sourceID: map[sourceID] ?? sourceID,
-                    rect: rect,
-                    inverseRect: inverseRect
-                )
-            }
-            return AnnotationHistoryOperation(actionName: actionName, mutation: nextMutation)
-        }
-    }
-
-    private enum AnnotationHistoryError: LocalizedError {
-        case documentUnavailable
-        case unsupportedSnapshot
-        case recreatedAnnotationsMissing
-        case updatedAnnotationMissing
-
-        var errorDescription: String? {
-            switch self {
-            case .documentUnavailable: "The PDF is no longer available."
-            case .unsupportedSnapshot: "An annotation type in the history cannot be restored."
-            case .recreatedAnnotationsMissing: "The restored annotations could not be found."
-            case .updatedAnnotationMissing: "The updated annotation could not be found."
-            }
-        }
-    }
-
     enum ZoomAction {
         case inwards
         case outwards
@@ -91,7 +27,11 @@ final class PDFDocumentManager: ObservableObject {
 
     @Published private(set) var document: PDFDocument?
     @Published private(set) var documentURL: URL?
-    @Published private(set) var annotations: [Annotation] = []
+    @Published private(set) var annotations: [Annotation] = [] {
+        didSet {
+            annotationsByPage = Dictionary(grouping: annotations, by: \.pageIndex)
+        }
+    }
     @Published private(set) var isLoadingAnnotations = false
     @Published private(set) var focusedAnnotation: Annotation?
     @Published private(set) var annotationNavigationID = 0
@@ -111,6 +51,7 @@ final class PDFDocumentManager: ObservableObject {
     @Published var selectedPageIndex = 0
     @Published var errorMessage: String?
     @Published private(set) var thumbnailRevision = 0
+    @Published private(set) var pageThumbnailRevisions: [Int: Int] = [:]
 
     let searchController: PDFSearchController
 
@@ -123,9 +64,10 @@ final class PDFDocumentManager: ObservableObject {
     private let documentPicker: any PDFDocumentPicking
     private let documentBuilder: any PDFDocumentBuilding
     private var annotationLoadID = UUID()
-    private var annotationUndoHistory: [AnnotationHistoryOperation] = []
-    private var annotationRedoHistory: [AnnotationHistoryOperation] = []
-    private let renderedPageCache = NSCache<NSString, NSImage>()
+    private var historyStore = AnnotationHistoryStore()
+    private let thumbnailCache = PageThumbnailCache()
+    private(set) var annotationsByPage: [Int: [Annotation]] = [:]
+    private var activeMutationTail: Task<Void, Never>?
 
     init(
         annotationParser: any AnnotationParsing = SwiftPDFAnnotationParser(),
@@ -147,8 +89,6 @@ final class PDFDocumentManager: ObservableObject {
         self.documentPicker = documentPicker
         self.documentBuilder = documentBuilder
         self.searchController = searchController
-        renderedPageCache.countLimit = 48
-        renderedPageCache.totalCostLimit = 24 * 1_024 * 1_024
         recentDocuments = recentDocumentStore.load()
     }
 
@@ -156,6 +96,28 @@ final class PDFDocumentManager: ObservableObject {
 
     private var isMutatingDocument: Bool {
         isSavingAnnotation || !updatingAnnotationIDs.isEmpty
+    }
+
+    private func enqueueMutation<T: Sendable>(
+        for loadID: UUID,
+        fallback: T,
+        operation: @escaping @MainActor () async -> T
+    ) async -> T {
+        let previous = activeMutationTail
+        let task = Task<T, Never> { @MainActor [weak self] in
+            await previous?.value
+            guard let self, self.annotationLoadID == loadID else { return fallback }
+            return await operation()
+        }
+        let tailTask = Task<Void, Never> { @MainActor in
+            _ = await task.value
+        }
+        activeMutationTail = tailTask
+        let result = await task.value
+        if activeMutationTail == tailTask {
+            activeMutationTail = nil
+        }
+        return result
     }
 
     func requestOpenPanel() {
@@ -171,29 +133,42 @@ final class PDFDocumentManager: ObservableObject {
         documentPicker.cancel()
         let loadID = UUID()
         annotationLoadID = loadID
+        activeMutationTail = nil
+
+        let annotationsTask = Task { [annotationParser] in
+            try await annotationParser.annotations(in: url)
+        }
 
         let loadedDocument: LoadedPDFDocument?
         // Fast path: Build directly from URL with in-memory non-link annotation stripping.
         // Bypasses subprocess invocation and disk re-compression, opening PDFs in milliseconds.
         if displayDocumentPreparer is SwiftPDFDisplayDocumentPreparer,
-           let direct = documentBuilder.build(from: url) {
+           let direct = await documentBuilder.load(from: url) {
             loadedDocument = direct
         } else {
             let displayData: Data
             do {
                 displayData = try await displayDocumentPreparer.displayData(for: url)
             } catch {
+                annotationsTask.cancel()
                 guard annotationLoadID == loadID else { return }
                 errorMessage = DocumentError.cannotPrepare(url, error.localizedDescription).localizedDescription
                 return
             }
 
-            guard annotationLoadID == loadID else { return }
-            loadedDocument = documentBuilder.build(from: displayData)
+            guard annotationLoadID == loadID else {
+                annotationsTask.cancel()
+                return
+            }
+            loadedDocument = await documentBuilder.load(from: displayData)
         }
 
-        guard annotationLoadID == loadID else { return }
+        guard annotationLoadID == loadID else {
+            annotationsTask.cancel()
+            return
+        }
         guard let loaded = loadedDocument else {
+            annotationsTask.cancel()
             errorMessage = DocumentError.cannotOpen(url).localizedDescription
             return
         }
@@ -204,7 +179,9 @@ final class PDFDocumentManager: ObservableObject {
         annotations = []
         isSavingAnnotation = false
         updatingAnnotationIDs = []
-        invalidateThumbnailCache()
+        thumbnailCache.reset()
+        pageThumbnailRevisions.removeAll()
+        thumbnailRevision += 1
         focusedAnnotation = nil
         annotationPresentationRequest = .sidebarNavigation
         selectedAnnotationID = nil
@@ -214,89 +191,58 @@ final class PDFDocumentManager: ObservableObject {
         selectedPageIndex = 0
         errorMessage = nil
         recordRecentDocument(url)
-        await loadAnnotations(id: loadID, documentURL: url)
+        await loadAnnotations(id: loadID, task: annotationsTask)
+    }
+
+    func thumbnailRevision(for pageIndex: Int) -> Int {
+        thumbnailRevision + (pageThumbnailRevisions[pageIndex] ?? 0)
     }
 
     func cachedThumbnail(for pageIndex: Int, scale: CGFloat) -> NSImage? {
-        let cacheKey = RenderedPageKey(pageIndex: pageIndex, scale: scale)
-        return renderedPageCache.object(forKey: cacheKey.value)
+        thumbnailCache.cachedThumbnail(for: pageIndex, scale: scale)
     }
 
     func renderPageAsync(pageIndex: Int, scale: CGFloat) async -> NSImage? {
-        let cacheKey = RenderedPageKey(pageIndex: pageIndex, scale: scale)
-        if let cached = renderedPageCache.object(forKey: cacheKey.value) { return cached }
-        guard let page = document?.page(at: pageIndex) else { return nil }
-
-        let pageBounds = page.bounds(for: .cropBox)
-        let size = CGSize(width: pageBounds.width * scale, height: pageBounds.height * scale)
-        guard size.width > 0, size.height > 0 else { return nil }
-
-        await Task.yield()
-
-        let baseImage = page.thumbnail(of: size, for: .cropBox)
-        let pageAnnotations = getAnnotations(pageIndex: pageIndex)
-        let image = pageAnnotations.isEmpty ? baseImage : compositeAnnotations(pageAnnotations, on: baseImage, page: page, scale: scale)
-
-        let estimatedCost = max(1, Int(image.size.width * image.size.height * 4))
-        renderedPageCache.setObject(image, forKey: cacheKey.value, cost: estimatedCost)
-        return image
+        await thumbnailCache.renderPageAsync(
+            pageIndex: pageIndex,
+            scale: scale,
+            document: document,
+            documentURL: documentURL,
+            annotations: getAnnotations(pageIndex: pageIndex)
+        )
     }
 
     func renderPage(pageIndex: Int, scale: CGFloat) throws -> NSImage {
-        let cacheKey = RenderedPageKey(pageIndex: pageIndex, scale: scale)
-        if let cached = renderedPageCache.object(forKey: cacheKey.value) { return cached }
+        if let cached = thumbnailCache.cachedThumbnail(for: pageIndex, scale: scale) {
+            return cached
+        }
         guard let page = document?.page(at: pageIndex) else {
             throw DocumentError.pageMissing(pageIndex)
         }
-
-        let pageBounds = page.bounds(for: .cropBox)
-        let size = CGSize(width: pageBounds.width * scale, height: pageBounds.height * scale)
-        let baseImage = page.thumbnail(of: size, for: .cropBox)
-        let pageAnnotations = getAnnotations(pageIndex: pageIndex)
-        let image = pageAnnotations.isEmpty ? baseImage : compositeAnnotations(pageAnnotations, on: baseImage, page: page, scale: scale)
-
-        let estimatedCost = max(1, Int(image.size.width * image.size.height * 4))
-        renderedPageCache.setObject(image, forKey: cacheKey.value, cost: estimatedCost)
-        return image
-    }
-
-    private func compositeAnnotations(
-        _ pageAnnotations: [Annotation],
-        on baseImage: NSImage,
-        page: PDFPage,
-        scale: CGFloat
-    ) -> NSImage {
-        let size = baseImage.size
-        guard size.width > 0, size.height > 0 else { return baseImage }
-        let composited = NSImage(size: size)
-        composited.lockFocus()
-        baseImage.draw(in: CGRect(origin: .zero, size: size))
-        if let context = NSGraphicsContext.current?.cgContext {
-            context.saveGState()
-            let pageBounds = page.bounds(for: .cropBox)
-            let isRotated = page.rotation == 90 || page.rotation == 270
-            let boxWidth = isRotated ? pageBounds.height : pageBounds.width
-            let boxHeight = isRotated ? pageBounds.width : pageBounds.height
-            if boxWidth > 0, boxHeight > 0 {
-                let scaleX = size.width / boxWidth
-                let scaleY = size.height / boxHeight
-                context.scaleBy(x: scaleX, y: scaleY)
-                context.concatenate(page.transform(for: .cropBox))
-                AnnotationOverlayRenderer.draw(pageAnnotations, context: context)
-            }
-            context.restoreGState()
-        }
-        composited.unlockFocus()
-        return composited
+        return thumbnailCache.renderPageSync(
+            pageIndex: pageIndex,
+            scale: scale,
+            page: page,
+            annotations: getAnnotations(pageIndex: pageIndex)
+        )
     }
 
     func invalidateThumbnailCache() {
-        renderedPageCache.removeAllObjects()
+        thumbnailCache.invalidateAll()
+        pageThumbnailRevisions.removeAll()
         thumbnailRevision += 1
     }
 
+    private func invalidateThumbnails(for pages: Set<Int>) {
+        guard !pages.isEmpty else { return }
+        thumbnailCache.invalidate(pages: pages)
+        for page in pages {
+            pageThumbnailRevisions[page, default: 0] += 1
+        }
+    }
+
     func getAnnotations(pageIndex: Int) -> [Annotation] {
-        annotations.filter { $0.pageIndex == pageIndex }
+        annotationsByPage[pageIndex] ?? []
     }
 
     func goTo(annotation: Annotation, preservingMultipleSelection: Bool = false) {
@@ -362,66 +308,69 @@ final class PDFDocumentManager: ObservableObject {
     }
 
     func move(_ annotation: Annotation, to bounds: CGRect) async -> Bool {
-        guard let targetURL = documentURL, let sourceID = annotation.sourceID, !isMutatingDocument else {
+        guard let targetURL = documentURL, let sourceID = annotation.sourceID else {
             return false
         }
         let loadID = annotationLoadID
-        isSavingAnnotation = true
-        defer {
-            if annotationLoadID == loadID { isSavingAnnotation = false }
-        }
-        // Optimistically move the in-memory annotation so the overlay does not
-        // snap back to the old position while the PDF is being rewritten.
-        let originalAnnotation = annotations.first(where: { $0.id == annotation.id })
-            ?? annotations.first(where: { $0.sourceID == sourceID })
-        if let index = annotations.firstIndex(where: { $0.id == annotation.id }) {
-            var moved = annotations[index]
-            moved.bounds = bounds
-            annotations[index] = moved
-            if focusedAnnotation?.id == annotation.id {
-                focusedAnnotation = moved
+        return await enqueueMutation(for: loadID, fallback: false) { [self] in
+            guard self.documentURL == targetURL else { return false }
+            self.isSavingAnnotation = true
+            defer {
+                if self.annotationLoadID == loadID { self.isSavingAnnotation = false }
             }
-        }
-        do {
-            try await annotationWriter.move(
-                in: targetURL,
-                sourceID: sourceID,
-                rect: bounds,
-                modifiedAt: Date()
-            )
-            guard annotationLoadID == loadID, self.documentURL == targetURL else { return false }
-            try await refreshAnnotations(for: loadID, targetURL: targetURL)
-            if let updated = annotations.first(where: { $0.sourceID == sourceID }) {
-                if focusedAnnotation?.id == annotation.id {
-                    focusedAnnotation = updated
+            // Optimistically move the in-memory annotation so the overlay does not
+            // snap back to the old position while the PDF is being rewritten.
+            let originalAnnotation = self.annotations.first(where: { $0.id == annotation.id })
+                ?? self.annotations.first(where: { $0.sourceID == sourceID })
+            if let index = self.annotations.firstIndex(where: { $0.id == annotation.id }) {
+                var moved = self.annotations[index]
+                moved.bounds = bounds
+                self.annotations[index] = moved
+                if self.focusedAnnotation?.id == annotation.id {
+                    self.focusedAnnotation = moved
                 }
             }
-            if let previousBounds = originalAnnotation?.bounds, previousBounds != bounds {
-                recordAnnotationHistory(
-                    AnnotationHistoryOperation(
-                        actionName: "Move Annotation",
-                        mutation: .move(
-                            sourceID: sourceID,
-                            rect: previousBounds,
-                            inverseRect: bounds
+            do {
+                try await self.annotationWriter.move(
+                    in: targetURL,
+                    sourceID: sourceID,
+                    rect: bounds,
+                    modifiedAt: Date()
+                )
+                guard self.annotationLoadID == loadID, self.documentURL == targetURL else { return false }
+                try await self.refreshAnnotations(for: loadID, targetURL: targetURL)
+                if let updated = self.annotations.first(where: { $0.sourceID == sourceID }) {
+                    if self.focusedAnnotation?.id == annotation.id {
+                        self.focusedAnnotation = updated
+                    }
+                }
+                if let previousBounds = originalAnnotation?.bounds, previousBounds != bounds {
+                    self.recordAnnotationHistory(
+                        AnnotationHistoryOperation(
+                            actionName: "Move Annotation",
+                            mutation: .move(
+                                sourceID: sourceID,
+                                rect: previousBounds,
+                                inverseRect: bounds
+                            )
                         )
                     )
-                )
-            }
-            return true
-        } catch {
-            guard annotationLoadID == loadID else { return false }
-            // The write did not reach disk. Restore the optimistic state so the
-            // overlay continues to reflect the document the user actually has.
-            if let originalAnnotation,
-               let index = annotations.firstIndex(where: { $0.id == annotation.id }) {
-                annotations[index] = originalAnnotation
-                if focusedAnnotation?.id == annotation.id {
-                    focusedAnnotation = originalAnnotation
                 }
+                return true
+            } catch {
+                guard self.annotationLoadID == loadID else { return false }
+                // The write did not reach disk. Restore the optimistic state so the
+                // overlay continues to reflect the document the user actually has.
+                if let originalAnnotation,
+                   let index = self.annotations.firstIndex(where: { $0.id == annotation.id }) {
+                    self.annotations[index] = originalAnnotation
+                    if self.focusedAnnotation?.id == annotation.id {
+                        self.focusedAnnotation = originalAnnotation
+                    }
+                }
+                self.errorMessage = "Annotation could not be moved: \(error.localizedDescription)"
+                return false
             }
-            errorMessage = "Annotation could not be moved: \(error.localizedDescription)"
-            return false
         }
     }
 
@@ -432,170 +381,182 @@ final class PDFDocumentManager: ObservableObject {
 
     @discardableResult
     func updateStatus(of selectedAnnotations: [Annotation], to status: Annotation.Status) async -> Bool {
-        guard let targetURL = documentURL, !isMutatingDocument else { return false }
+        guard let targetURL = documentURL else { return false }
         let loadID = annotationLoadID
-        let liveCandidates = selectedAnnotations.map { candidate in
-            annotations.first(where: { $0.id == candidate.id })
-                ?? candidate.sourceID.flatMap { id in annotations.first(where: { $0.sourceID == id }) }
-                ?? candidate
-        }
-        let candidates = liveCandidates.filter {
-            $0.status != status
-                && $0.statusTargetSourceID != nil
-                && !updatingAnnotationIDs.contains($0.id)
-        }
-        guard !candidates.isEmpty else {
-            return !liveCandidates.isEmpty && liveCandidates.allSatisfy {
-                $0.status == status && $0.statusTargetSourceID != nil
+        return await enqueueMutation(for: loadID, fallback: false) { [self] in
+            guard self.documentURL == targetURL else { return false }
+            let liveCandidates = selectedAnnotations.map { candidate in
+                self.annotations.first(where: { $0.id == candidate.id })
+                    ?? candidate.sourceID.flatMap { id in self.annotations.first(where: { $0.sourceID == id }) }
+                    ?? candidate
             }
-        }
-
-        let candidateIDs = Set(candidates.map(\.id))
-        updatingAnnotationIDs.formUnion(candidateIDs)
-        defer {
-            if annotationLoadID == loadID {
-                updatingAnnotationIDs.subtract(candidateIDs)
+            let candidates = liveCandidates.filter {
+                $0.status != status
+                    && $0.statusTargetSourceID != nil
+                    && !self.updatingAnnotationIDs.contains($0.id)
             }
-        }
-
-        var seenSourceIDs = Set<String>()
-        let updates = candidates.compactMap { annotation -> AnnotationStatusUpdate? in
-            guard let sourceID = annotation.statusTargetSourceID,
-                  seenSourceIDs.insert(sourceID).inserted else { return nil }
-            return AnnotationStatusUpdate(sourceID: sourceID, status: status)
-        }
-        do {
-            try await annotationStatusUpdater.updateStatuses(
-                in: targetURL,
-                updates: updates
-            )
-            guard annotationLoadID == loadID, self.documentURL == targetURL else { return false }
-            for index in annotations.indices where candidateIDs.contains(annotations[index].id) {
-                annotations[index].status = status
-                if focusedAnnotation?.id == annotations[index].id {
-                    focusedAnnotation = annotations[index]
+            guard !candidates.isEmpty else {
+                return !liveCandidates.isEmpty && liveCandidates.allSatisfy {
+                    $0.status == status && $0.statusTargetSourceID != nil
                 }
             }
-            invalidateThumbnailCache()
-            return true
-        } catch {
-            guard annotationLoadID == loadID else { return false }
-            errorMessage = candidates.count == 1
-                ? "Annotation status could not be updated: \(error.localizedDescription)"
-                : "Annotation statuses could not be updated: \(error.localizedDescription)"
-            return false
+
+            let candidateIDs = Set(candidates.map(\.id))
+            self.updatingAnnotationIDs.formUnion(candidateIDs)
+            defer {
+                if self.annotationLoadID == loadID {
+                    self.updatingAnnotationIDs.subtract(candidateIDs)
+                }
+            }
+
+            var seenSourceIDs = Set<String>()
+            let updates = candidates.compactMap { annotation -> AnnotationStatusUpdate? in
+                guard let sourceID = annotation.statusTargetSourceID,
+                      seenSourceIDs.insert(sourceID).inserted else { return nil }
+                return AnnotationStatusUpdate(sourceID: sourceID, status: status)
+            }
+            do {
+                try await self.annotationStatusUpdater.updateStatuses(
+                    in: targetURL,
+                    updates: updates
+                )
+                guard self.annotationLoadID == loadID, self.documentURL == targetURL else { return false }
+                for index in self.annotations.indices where candidateIDs.contains(self.annotations[index].id) {
+                    self.annotations[index].status = status
+                    if self.focusedAnnotation?.id == self.annotations[index].id {
+                        self.focusedAnnotation = self.annotations[index]
+                    }
+                }
+                self.invalidateThumbnails(for: Set(candidates.map(\.pageIndex)))
+                return true
+            } catch {
+                guard self.annotationLoadID == loadID else { return false }
+                self.errorMessage = candidates.count == 1
+                    ? "Annotation status could not be updated: \(error.localizedDescription)"
+                    : "Annotation statuses could not be updated: \(error.localizedDescription)"
+                return false
+            }
         }
     }
 
     func createMarkup(kind: Annotation.Kind, selection: PDFMarkupSelection) async -> Annotation? {
-        guard let targetURL = documentURL, !selection.isEmpty, !isMutatingDocument else { return nil }
+        guard let targetURL = documentURL, !selection.isEmpty else { return nil }
         let loadID = annotationLoadID
-        let existingSourceIDs = Set(annotations.compactMap(\.sourceID))
-        isSavingAnnotation = true
-        defer {
-            if annotationLoadID == loadID { isSavingAnnotation = false }
-        }
-        do {
-            try await annotationWriter.createMarkup(
-                in: targetURL,
-                kind: kind,
-                selection: selection,
-                contents: "",
-                author: defaultAuthor,
-                color: colorMemory.color(for: kind),
-                createdAt: Date()
-            )
-            guard annotationLoadID == loadID, self.documentURL == targetURL else { return nil }
-            let created = try await refreshAnnotations(excluding: existingSourceIDs, for: loadID, targetURL: targetURL)
-            guard !created.isEmpty else { return nil }
-            recordAnnotationHistory(
-                AnnotationHistoryOperation(
-                    actionName: created.count == 1 ? "Add Annotation" : "Add Annotations",
-                    mutation: .delete(
-                        snapshots: created,
-                        sourceIDs: deletionSourceIDs(for: created)
+        return await enqueueMutation(for: loadID, fallback: nil) { [self] in
+            guard self.documentURL == targetURL else { return nil }
+            let existingSourceIDs = Set(self.annotations.compactMap(\.sourceID))
+            self.isSavingAnnotation = true
+            defer {
+                if self.annotationLoadID == loadID { self.isSavingAnnotation = false }
+            }
+            do {
+                try await self.annotationWriter.createMarkup(
+                    in: targetURL,
+                    kind: kind,
+                    selection: selection,
+                    contents: "",
+                    author: self.defaultAuthor,
+                    color: self.colorMemory.color(for: kind),
+                    createdAt: Date()
+                )
+                guard self.annotationLoadID == loadID, self.documentURL == targetURL else { return nil }
+                let created = try await self.refreshAnnotations(excluding: existingSourceIDs, for: loadID, targetURL: targetURL)
+                guard !created.isEmpty else { return nil }
+                self.recordAnnotationHistory(
+                    AnnotationHistoryOperation(
+                        actionName: created.count == 1 ? "Add Annotation" : "Add Annotations",
+                        mutation: .delete(
+                            snapshots: created,
+                            sourceIDs: self.deletionSourceIDs(for: created)
+                        )
                     )
                 )
-            )
-            return created.first
-        } catch {
-            guard annotationLoadID == loadID else { return nil }
-            errorMessage = "Text markup could not be created: \(error.localizedDescription)"
-            return nil
+                return created.first
+            } catch {
+                guard self.annotationLoadID == loadID else { return nil }
+                self.errorMessage = "Text markup could not be created: \(error.localizedDescription)"
+                return nil
+            }
         }
     }
 
     func createNote(at location: PDFPagePoint) async -> Annotation? {
-        guard let targetURL = documentURL, !isMutatingDocument else { return nil }
+        guard let targetURL = documentURL else { return nil }
         let loadID = annotationLoadID
-        let existingSourceIDs = Set(annotations.compactMap(\.sourceID))
-        isSavingAnnotation = true
-        defer {
-            if annotationLoadID == loadID { isSavingAnnotation = false }
-        }
-        do {
-            try await annotationWriter.createNote(
-                in: targetURL,
-                location: location,
-                contents: "",
-                author: defaultAuthor,
-                color: colorMemory.color(for: .note),
-                createdAt: Date()
-            )
-            guard annotationLoadID == loadID, self.documentURL == targetURL else { return nil }
-            let created = try await refreshAnnotations(excluding: existingSourceIDs, for: loadID, targetURL: targetURL)
-            guard !created.isEmpty else { return nil }
-            recordAnnotationHistory(
-                AnnotationHistoryOperation(
-                    actionName: "Add Annotation",
-                    mutation: .delete(
-                        snapshots: created,
-                        sourceIDs: deletionSourceIDs(for: created)
+        return await enqueueMutation(for: loadID, fallback: nil) { [self] in
+            guard self.documentURL == targetURL else { return nil }
+            let existingSourceIDs = Set(self.annotations.compactMap(\.sourceID))
+            self.isSavingAnnotation = true
+            defer {
+                if self.annotationLoadID == loadID { self.isSavingAnnotation = false }
+            }
+            do {
+                try await self.annotationWriter.createNote(
+                    in: targetURL,
+                    location: location,
+                    contents: "",
+                    author: self.defaultAuthor,
+                    color: self.colorMemory.color(for: .note),
+                    createdAt: Date()
+                )
+                guard self.annotationLoadID == loadID, self.documentURL == targetURL else { return nil }
+                let created = try await self.refreshAnnotations(excluding: existingSourceIDs, for: loadID, targetURL: targetURL)
+                guard !created.isEmpty else { return nil }
+                self.recordAnnotationHistory(
+                    AnnotationHistoryOperation(
+                        actionName: "Add Annotation",
+                        mutation: .delete(
+                            snapshots: created,
+                            sourceIDs: self.deletionSourceIDs(for: created)
+                        )
                     )
                 )
-            )
-            return created.first
-        } catch {
-            guard annotationLoadID == loadID else { return nil }
-            errorMessage = "Sticky note could not be created: \(error.localizedDescription)"
-            return nil
+                return created.first
+            } catch {
+                guard self.annotationLoadID == loadID else { return nil }
+                self.errorMessage = "Sticky note could not be created: \(error.localizedDescription)"
+                return nil
+            }
         }
     }
 
     func createCaret(at location: PDFPagePoint) async -> Annotation? {
-        guard let targetURL = documentURL, !isMutatingDocument else { return nil }
+        guard let targetURL = documentURL else { return nil }
         let loadID = annotationLoadID
-        let existingSourceIDs = Set(annotations.compactMap(\.sourceID))
-        isSavingAnnotation = true
-        defer {
-            if annotationLoadID == loadID { isSavingAnnotation = false }
-        }
-        do {
-            try await annotationWriter.createCaret(
-                in: targetURL,
-                location: location,
-                contents: "",
-                author: defaultAuthor,
-                color: colorMemory.color(for: .caret),
-                createdAt: Date()
-            )
-            guard annotationLoadID == loadID, self.documentURL == targetURL else { return nil }
-            let created = try await refreshAnnotations(excluding: existingSourceIDs, for: loadID, targetURL: targetURL)
-            guard !created.isEmpty else { return nil }
-            recordAnnotationHistory(
-                AnnotationHistoryOperation(
-                    actionName: "Add Annotation",
-                    mutation: .delete(
-                        snapshots: created,
-                        sourceIDs: deletionSourceIDs(for: created)
+        return await enqueueMutation(for: loadID, fallback: nil) { [self] in
+            guard self.documentURL == targetURL else { return nil }
+            let existingSourceIDs = Set(self.annotations.compactMap(\.sourceID))
+            self.isSavingAnnotation = true
+            defer {
+                if self.annotationLoadID == loadID { self.isSavingAnnotation = false }
+            }
+            do {
+                try await self.annotationWriter.createCaret(
+                    in: targetURL,
+                    location: location,
+                    contents: "",
+                    author: self.defaultAuthor,
+                    color: self.colorMemory.color(for: .caret),
+                    createdAt: Date()
+                )
+                guard self.annotationLoadID == loadID, self.documentURL == targetURL else { return nil }
+                let created = try await self.refreshAnnotations(excluding: existingSourceIDs, for: loadID, targetURL: targetURL)
+                guard !created.isEmpty else { return nil }
+                self.recordAnnotationHistory(
+                    AnnotationHistoryOperation(
+                        actionName: "Add Annotation",
+                        mutation: .delete(
+                            snapshots: created,
+                            sourceIDs: self.deletionSourceIDs(for: created)
+                        )
                     )
                 )
-            )
-            return created.first
-        } catch {
-            guard annotationLoadID == loadID else { return nil }
-            errorMessage = "Text insertion could not be created: \(error.localizedDescription)"
-            return nil
+                return created.first
+            } catch {
+                guard self.annotationLoadID == loadID else { return nil }
+                self.errorMessage = "Text insertion could not be created: \(error.localizedDescription)"
+                return nil
+            }
         }
     }
 
@@ -603,58 +564,61 @@ final class PDFDocumentManager: ObservableObject {
         _ annotation: Annotation,
         contents: String
     ) async -> Bool {
-        guard let targetURL = documentURL, let sourceID = annotation.sourceID, !isMutatingDocument else {
+        guard let targetURL = documentURL, let sourceID = annotation.sourceID else {
             return false
         }
         let loadID = annotationLoadID
-        let current = annotations.first(where: { $0.sourceID == sourceID }) ?? annotation
-        let modifiedAt = Date()
-        var mutations: [AnnotationMutation] = [
-            .update(
-                sourceID: sourceID,
-                contents: contents,
-                author: current.author ?? defaultAuthor,
-                color: current.color,
-                modifiedAt: modifiedAt
-            )
-        ]
-        if let companionID = current.statusTargetSourceID, companionID != sourceID {
-            mutations.append(
+        return await enqueueMutation(for: loadID, fallback: false) { [self] in
+            guard self.documentURL == targetURL else { return false }
+            let current = self.annotations.first(where: { $0.sourceID == sourceID }) ?? annotation
+            let modifiedAt = Date()
+            var mutations: [AnnotationMutation] = [
                 .update(
-                    sourceID: companionID,
+                    sourceID: sourceID,
                     contents: contents,
-                    author: current.author ?? defaultAuthor,
-                    color: nil,
+                    author: current.author ?? self.defaultAuthor,
+                    color: current.color,
                     modifiedAt: modifiedAt
                 )
-            )
-        }
-        isSavingAnnotation = true
-        defer {
-            if annotationLoadID == loadID { isSavingAnnotation = false }
-        }
-        do {
-            try await annotationWriter.perform(mutations, in: targetURL)
-            guard annotationLoadID == loadID, self.documentURL == targetURL else { return false }
-            try await refreshAnnotations(for: loadID, targetURL: targetURL)
-            if let updated = annotations.first(where: { $0.sourceID == sourceID }) {
-                recordAnnotationHistory(
-                    AnnotationHistoryOperation(
-                        actionName: "Edit Annotation",
-                        mutation: .update(
-                            sourceID: sourceID,
-                            value: current,
-                            inverse: updated
-                        )
+            ]
+            if let companionID = current.statusTargetSourceID, companionID != sourceID {
+                mutations.append(
+                    .update(
+                        sourceID: companionID,
+                        contents: contents,
+                        author: current.author ?? self.defaultAuthor,
+                        color: nil,
+                        modifiedAt: modifiedAt
                     )
                 )
-                focusedAnnotation = updated
             }
-            return true
-        } catch {
-            guard annotationLoadID == loadID else { return false }
-            errorMessage = "Annotation could not be saved: \(error.localizedDescription)"
-            return false
+            self.isSavingAnnotation = true
+            defer {
+                if self.annotationLoadID == loadID { self.isSavingAnnotation = false }
+            }
+            do {
+                try await self.annotationWriter.perform(mutations, in: targetURL)
+                guard self.annotationLoadID == loadID, self.documentURL == targetURL else { return false }
+                try await self.refreshAnnotations(for: loadID, targetURL: targetURL)
+                if let updated = self.annotations.first(where: { $0.sourceID == sourceID }) {
+                    self.recordAnnotationHistory(
+                        AnnotationHistoryOperation(
+                            actionName: "Edit Annotation",
+                            mutation: .update(
+                                sourceID: sourceID,
+                                value: current,
+                                inverse: updated
+                            )
+                        )
+                    )
+                    self.focusedAnnotation = updated
+                }
+                return true
+            } catch {
+                guard self.annotationLoadID == loadID else { return false }
+                self.errorMessage = "Annotation could not be saved: \(error.localizedDescription)"
+                return false
+            }
         }
     }
 
@@ -665,20 +629,27 @@ final class PDFDocumentManager: ObservableObject {
 
     @discardableResult
     func deleteAnnotations(_ selectedAnnotations: [Annotation]) async -> Bool {
-        var seenSourceIDs = Set<String>()
-        let deletable = selectedAnnotations.compactMap { candidate -> Annotation? in
-            let live = annotations.first(where: { $0.id == candidate.id }) ?? candidate
-            guard let sourceID = live.sourceID,
-                  seenSourceIDs.insert(sourceID).inserted else { return nil }
-            return live
+        guard let targetURL = documentURL else { return false }
+        let loadID = annotationLoadID
+        return await enqueueMutation(for: loadID, fallback: false) { [self] in
+            guard self.documentURL == targetURL else { return false }
+            var seenSourceIDs = Set<String>()
+            let deletable = selectedAnnotations.compactMap { candidate -> Annotation? in
+                let live = self.annotations.first(where: { $0.id == candidate.id }) ?? candidate
+                guard let sourceID = live.sourceID,
+                      seenSourceIDs.insert(sourceID).inserted else { return nil }
+                return live
+            }
+            let sourceIDs = self.deletionSourceIDs(for: deletable)
+            guard !sourceIDs.isEmpty else { return false }
+            return await self.performDeleteAnnotations(
+                deletable,
+                sourceIDs: sourceIDs,
+                recordsHistory: deletable.allSatisfy { self.creationMutation(from: $0) != nil },
+                for: loadID,
+                targetURL: targetURL
+            )
         }
-        let sourceIDs = deletionSourceIDs(for: deletable)
-        guard !sourceIDs.isEmpty else { return false }
-        return await deleteAnnotations(
-            deletable,
-            sourceIDs: sourceIDs,
-            recordsHistory: deletable.allSatisfy { creationMutation(from: $0) != nil }
-        )
     }
 
     func undoAnnotationChange() async {
@@ -693,6 +664,32 @@ final class PDFDocumentManager: ObservableObject {
         if let pageIndex = searchController.perform(in: document) {
             selectedPageIndex = pageIndex
         }
+    }
+
+    func performSearchAsync() {
+        searchController.performAsync(in: document) { [weak self] pageIndex in
+            self?.selectedPageIndex = pageIndex
+        }
+    }
+
+    func close() {
+        annotationLoadID = UUID()
+        activeMutationTail = nil
+        searchController.reset()
+        thumbnailCache.reset()
+        clearAnnotationHistory()
+        document = nil
+        documentURL = nil
+        annotations = []
+        outlineItems = []
+        focusedAnnotation = nil
+        selectedAnnotationID = nil
+        selectedAnnotationIDs = []
+        updatingAnnotationIDs = []
+        isSavingAnnotation = false
+        isLoadingAnnotations = false
+        pageThumbnailRevisions.removeAll()
+        errorMessage = nil
     }
 
     func selectNextSearchResult() {
@@ -718,6 +715,11 @@ final class PDFDocumentManager: ObservableObject {
     }
 
     private var defaultAuthor: String {
+        if let custom = UserDefaults.standard.string(forKey: "defaultAuthorName")?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !custom.isEmpty {
+            return custom
+        }
         let fullName = NSFullUserName().trimmingCharacters(in: .whitespacesAndNewlines)
         return fullName.isEmpty ? NSUserName() : fullName
     }
@@ -753,13 +755,13 @@ final class PDFDocumentManager: ObservableObject {
         }
     }
 
-    private func deleteAnnotations(
+    private func performDeleteAnnotations(
         _ snapshots: [Annotation],
         sourceIDs: [String],
-        recordsHistory: Bool
+        recordsHistory: Bool,
+        for loadID: UUID,
+        targetURL: URL
     ) async -> Bool {
-        guard let targetURL = documentURL, !isMutatingDocument else { return false }
-        let loadID = annotationLoadID
         isSavingAnnotation = true
         defer {
             if annotationLoadID == loadID { isSavingAnnotation = false }
@@ -796,36 +798,37 @@ final class PDFDocumentManager: ObservableObject {
     }
 
     private func performAnnotationHistory(isUndo: Bool) async {
-        guard !isMutatingDocument else { return }
-        guard let operation = isUndo
-            ? annotationUndoHistory.popLast()
-            : annotationRedoHistory.popLast() else { return }
-
         let loadID = annotationLoadID
-        updateAnnotationHistoryAvailability()
-        isSavingAnnotation = true
-        defer {
-            if annotationLoadID == loadID {
-                isSavingAnnotation = false
-                updateAnnotationHistoryAvailability()
+        await enqueueMutation(for: loadID, fallback: ()) { [self] in
+            guard let operation = isUndo
+                ? self.historyStore.popUndo()
+                : self.historyStore.popRedo() else { return }
+
+            self.updateAnnotationHistoryAvailability()
+            self.isSavingAnnotation = true
+            defer {
+                if self.annotationLoadID == loadID {
+                    self.isSavingAnnotation = false
+                    self.updateAnnotationHistoryAvailability()
+                }
             }
-        }
-        do {
-            let inverse = try await executeAnnotationHistory(operation, for: loadID)
-            guard annotationLoadID == loadID else { return }
-            if isUndo {
-                annotationRedoHistory.append(inverse)
-            } else {
-                annotationUndoHistory.append(inverse)
+            do {
+                let inverse = try await self.executeAnnotationHistory(operation, for: loadID)
+                guard self.annotationLoadID == loadID else { return }
+                if isUndo {
+                    self.historyStore.pushRedo(inverse)
+                } else {
+                    self.historyStore.pushUndo(inverse)
+                }
+            } catch {
+                guard self.annotationLoadID == loadID else { return }
+                if isUndo {
+                    self.historyStore.pushUndo(operation)
+                } else {
+                    self.historyStore.pushRedo(operation)
+                }
+                self.errorMessage = "Annotation history action failed: \(error.localizedDescription)"
             }
-        } catch {
-            guard annotationLoadID == loadID else { return }
-            if isUndo {
-                annotationUndoHistory.append(operation)
-            } else {
-                annotationRedoHistory.append(operation)
-            }
-            errorMessage = "Annotation history action failed: \(error.localizedDescription)"
         }
     }
 
@@ -920,8 +923,7 @@ final class PDFDocumentManager: ObservableObject {
                 }
             }
             if !sourceIDMap.isEmpty {
-                annotationUndoHistory = annotationUndoHistory.map { $0.remappingSourceIDs(sourceIDMap) }
-                annotationRedoHistory = annotationRedoHistory.map { $0.remappingSourceIDs(sourceIDMap) }
+                historyStore.remapSourceIDs(sourceIDMap)
             }
 
             if let first = recreated.first { goTo(annotation: first) }
@@ -990,19 +992,40 @@ final class PDFDocumentManager: ObservableObject {
         }
     }
 
+    private struct MarkedTextCacheKey: Hashable {
+        let sourceID: String
+        let pageIndex: Int
+        let quadCoords: [CGFloat]
+    }
+
+    private struct CachedMarkedText {
+        let value: String?
+    }
+
     private func recordAnnotationHistory(_ operation: AnnotationHistoryOperation) {
-        if case let .delete(_, sourceIDs) = operation.mutation, sourceIDs.isEmpty { return }
-        annotationUndoHistory.append(operation)
-        annotationRedoHistory.removeAll()
+        historyStore.record(operation)
         updateAnnotationHistoryAvailability()
     }
 
     private func replaceAnnotationsPreservingSelection(with replacements: [Annotation]) {
+        let oldByPage = annotationsByPage
         let selectedSourceIDs = Set(annotations.lazy
             .filter { self.selectedAnnotationIDs.contains($0.id) }
             .compactMap(\.sourceID))
         let primarySourceID = annotations.first(where: { $0.id == selectedAnnotationID })?.sourceID
         let focusedSourceID = focusedAnnotation?.sourceID
+
+        var cachedMarkedText: [MarkedTextCacheKey: CachedMarkedText] = [:]
+        cachedMarkedText.reserveCapacity(annotations.count)
+        for annotation in annotations {
+            guard let sourceID = annotation.sourceID else { continue }
+            let key = MarkedTextCacheKey(
+                sourceID: sourceID,
+                pageIndex: annotation.pageIndex,
+                quadCoords: annotation.quadPoints.flatMap { [$0.x, $0.y] }
+            )
+            cachedMarkedText[key] = CachedMarkedText(value: annotation.markedText)
+        }
 
         // Re-parsing mints a fresh id for every annotation; carry each
         // refreshed annotation's predecessor id over by sourceID. Otherwise
@@ -1023,6 +1046,17 @@ final class PDFDocumentManager: ObservableObject {
             remapped[index].id = preservedID
         }
         for index in remapped.indices {
+            if let sourceID = remapped[index].sourceID {
+                let key = MarkedTextCacheKey(
+                    sourceID: sourceID,
+                    pageIndex: remapped[index].pageIndex,
+                    quadCoords: remapped[index].quadPoints.flatMap { [$0.x, $0.y] }
+                )
+                if let cached = cachedMarkedText[key] {
+                    remapped[index].markedText = cached.value
+                    continue
+                }
+            }
             remapped[index].markedText = markedText(for: remapped[index])
         }
 
@@ -1038,20 +1072,23 @@ final class PDFDocumentManager: ObservableObject {
         if let focusedSourceID {
             focusedAnnotation = remapped.first(where: { $0.sourceID == focusedSourceID })
         }
-        invalidateThumbnailCache()
+
+        let newByPage = annotationsByPage
+        let allPages = Set(oldByPage.keys).union(newByPage.keys)
+        let changedPages = Set(allPages.filter { oldByPage[$0] != newByPage[$0] })
+        invalidateThumbnails(for: changedPages)
     }
 
     private func clearAnnotationHistory() {
-        annotationUndoHistory.removeAll()
-        annotationRedoHistory.removeAll()
+        historyStore.clear()
         updateAnnotationHistoryAvailability()
     }
 
     private func updateAnnotationHistoryAvailability() {
-        canUndoAnnotationChange = !annotationUndoHistory.isEmpty
-        canRedoAnnotationChange = !annotationRedoHistory.isEmpty
-        undoAnnotationTitle = annotationUndoHistory.last.map { "Undo \($0.actionName)" } ?? "Undo"
-        redoAnnotationTitle = annotationRedoHistory.last.map { "Redo \($0.actionName)" } ?? "Redo"
+        canUndoAnnotationChange = historyStore.canUndo
+        canRedoAnnotationChange = historyStore.canRedo
+        undoAnnotationTitle = historyStore.undoTitle
+        redoAnnotationTitle = historyStore.redoTitle
     }
 
     /// Extracts the page text covered by the annotation's quads so the
@@ -1134,31 +1171,20 @@ final class PDFDocumentManager: ObservableObject {
         )
     }
 
-    private struct RenderedPageKey {
-        let pageIndex: Int
-        let scale: Int
-
-        var value: NSString {
-            "\(pageIndex):\(scale)" as NSString
-        }
-
-        init(pageIndex: Int, scale: CGFloat) {
-            self.pageIndex = pageIndex
-            self.scale = Int((scale * 1_000).rounded())
-        }
-    }
-
     private func recordRecentDocument(_ url: URL) {
         recentDocuments = recentDocumentStore.record(url)
     }
 
-    private func loadAnnotations(id: UUID, documentURL: URL) async {
+    private func loadAnnotations(
+        id: UUID,
+        task: Task<[Annotation], Error>
+    ) async {
         isLoadingAnnotations = true
         defer {
             if annotationLoadID == id { isLoadingAnnotations = false }
         }
         do {
-            let parsed = try await annotationParser.annotations(in: documentURL)
+            let parsed = try await task.value
             guard annotationLoadID == id else { return }
             replaceAnnotationsPreservingSelection(with: parsed)
         } catch {

@@ -1,6 +1,6 @@
 import Foundation
 
-struct DocumentOutlineItem: Identifiable, Hashable {
+struct DocumentOutlineItem: Identifiable, Hashable, Sendable {
     let id = UUID()
     let title: String
     let pageIndex: Int?

@@ -214,9 +214,33 @@ enum AnnotationOverlayRenderer {
                 .insetBy(dx: -4, dy: -4)
                 .contains(point)
         }
-        return quadrilaterals(from: annotation).contains { quad in
-            path(for: quad).boundingBox.insetBy(dx: -2, dy: -2).contains(point)
+        let points = annotation.quadPoints
+        if points.count >= 4 {
+            for index in stride(from: 0, through: points.count - 4, by: 4) {
+                let p0 = points[index]
+                let p1 = points[index + 1]
+                let p2 = points[index + 2]
+                let p3 = points[index + 3]
+                let minX = min(min(p0.x, p1.x), min(p2.x, p3.x))
+                let maxX = max(max(p0.x, p1.x), max(p2.x, p3.x))
+                let minY = min(min(p0.y, p1.y), min(p2.y, p3.y))
+                let maxY = max(max(p0.y, p1.y), max(p2.y, p3.y))
+                let hitBox = CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
+                    .insetBy(dx: -2, dy: -2)
+                if hitBox.contains(point) {
+                    return true
+                }
+            }
+            return false
         }
+        guard annotation.kind == .highlight else { return false }
+        let rect = annotation.bounds
+        guard rect.width > 0.5, rect.height > 0.5,
+              rect.width < 10_000, rect.height < 10_000,
+              rect.minX.isFinite, rect.minY.isFinite else {
+            return false
+        }
+        return rect.insetBy(dx: -2, dy: -2).contains(point)
     }
 
     private static func drawTextMarkupLine(
@@ -243,7 +267,7 @@ enum AnnotationOverlayRenderer {
         )
         context.fillPath()
 
-        context.setStrokeColor(NSColor.white.withAlphaComponent(0.88).cgColor)
+        context.setStrokeColor(CGColor(gray: 1, alpha: 0.88))
         context.setLineWidth(0.7)
         context.addPath(CGPath(roundedRect: iconRect, cornerWidth: radius, cornerHeight: radius, transform: nil))
         context.strokePath()
@@ -253,11 +277,11 @@ enum AnnotationOverlayRenderer {
         foldPath.move(to: CGPoint(x: iconRect.maxX - fold, y: iconRect.maxY))
         foldPath.addLine(to: CGPoint(x: iconRect.maxX - fold, y: iconRect.maxY - fold))
         foldPath.addLine(to: CGPoint(x: iconRect.maxX, y: iconRect.maxY - fold))
-        context.setFillColor(NSColor.white.withAlphaComponent(0.7).cgColor)
+        context.setFillColor(CGColor(gray: 1, alpha: 0.7))
         context.addPath(foldPath)
         context.fillPath()
 
-        context.setStrokeColor(NSColor.white.withAlphaComponent(0.9).cgColor)
+        context.setStrokeColor(CGColor(gray: 1, alpha: 0.9))
         context.setLineWidth(0.8)
         for fraction in [CGFloat(0.38), CGFloat(0.62)] {
             let y = iconRect.minY + iconRect.height * fraction

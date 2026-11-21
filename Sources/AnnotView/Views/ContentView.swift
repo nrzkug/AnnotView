@@ -38,42 +38,33 @@ struct ContentView: View {
     @EnvironmentObject private var documentManager: PDFDocumentManager
     @EnvironmentObject private var chromeState: ReaderChromeState
     @EnvironmentObject private var searchController: PDFSearchController
-    @State private var annotationStatusFilter: Annotation.Status?
-    @FocusState private var searchFieldIsFocused: Bool
+    @ObservedObject private var colorMemory = AnnotationColorMemory.shared
 
     var body: some View {
         ReaderContentSplitView(
             isSidebarVisible: $chromeState.thumbnailSidebarIsPresented,
             isInspectorVisible: $chromeState.inspectorIsPresented,
-            chromeHeight: $chromeState.titleBarHeight
+            chromeHeight: $chromeState.titleBarHeight,
+            annotationTool: chromeState.annotationTool,
+            colorRevision: colorMemory.revision
         ) {
-            ThumbnailSidebar()
-                .padding(.top, chromeState.titleBarHeight + 12)
-                .scrollContentBackground(.hidden)
+            SidebarPaneView()
+                .environmentObject(documentManager)
+                .environmentObject(chromeState)
         } main: {
-            reader
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(Color(nsColor: .windowBackgroundColor))
+            MainReaderPaneView()
+                .environmentObject(documentManager)
+                .environmentObject(chromeState)
+                .environmentObject(searchController)
         } inspector: {
-            AnnotationSidebar(statusFilter: $annotationStatusFilter)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .padding(.top, chromeState.titleBarHeight + 12)
+            InspectorPaneView()
+                .environmentObject(documentManager)
+                .environmentObject(chromeState)
         } tools: {
-            annotationToolControl
+            AnnotationToolControlView(chromeState: chromeState)
         }
         .ignoresSafeArea(.container, edges: .top)
-        .onChange(of: searchController.query) { _, query in
-            if query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                searchController.reset()
-            }
-        }
-        .onChange(of: chromeState.searchIsPresented) { _, isPresented in
-            searchFieldIsFocused = isPresented
-            if !isPresented {
-                searchController.query = ""
-            }
-        }
-        .frame(minWidth: 1_000, minHeight: 620)
+        .frame(minWidth: 720, minHeight: 500)
         .alert(
             "AnnotView",
             isPresented: Binding(
@@ -105,42 +96,50 @@ struct ContentView: View {
             chromeState.hasMarkupSelection = false
         }
     }
+}
 
-    @ViewBuilder
-    private var annotationToolControl: some View {
-        Group {
-            if #available(macOS 27.0, *) {
-                annotationToolPicker
-                    .pickerStyle(.tabs)
-                    .labelStyle(.iconOnly)
-                    .fixedSize()
-                    .padding(.horizontal, 3)
-                    .padding(.vertical, 2)
-                    .glassEffect(.regular, in: Capsule())
-            } else {
-                annotationToolPicker
-                    .pickerStyle(.segmented)
-                    .labelStyle(.iconOnly)
-                    .fixedSize()
-            }
-        }
+private struct SidebarPaneView: View {
+    @EnvironmentObject private var chromeState: ReaderChromeState
+
+    var body: some View {
+        ThumbnailSidebar()
+            .padding(.top, chromeState.titleBarHeight + 14)
+            .scrollContentBackground(.hidden)
     }
+}
 
-    private var annotationToolPicker: some View {
-        Picker("Annotation Tool", selection: $chromeState.annotationTool) {
-            ForEach(AnnotationTool.allCases, id: \.self) { tool in
-                Label {
-                    Text(tool.label)
-                } icon: {
-                    Image(tool.iconName, bundle: .module)
-                        .resizable()
-                        .scaledToFit()
-                        .frame(width: 16, height: 16)
+private struct InspectorPaneView: View {
+    @EnvironmentObject private var chromeState: ReaderChromeState
+    @State private var annotationStatusFilter: Annotation.Status?
+
+    var body: some View {
+        AnnotationSidebar(statusFilter: $annotationStatusFilter)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .padding(.top, chromeState.titleBarHeight + 14)
+    }
+}
+
+private struct MainReaderPaneView: View {
+    @EnvironmentObject private var documentManager: PDFDocumentManager
+    @EnvironmentObject private var chromeState: ReaderChromeState
+    @EnvironmentObject private var searchController: PDFSearchController
+    @FocusState private var searchFieldIsFocused: Bool
+
+    var body: some View {
+        reader
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Color(nsColor: .underPageBackgroundColor))
+            .onChange(of: searchController.query) { _, query in
+                if query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    searchController.reset()
                 }
-                .tag(tool)
-                .help(tool.label)
             }
-        }
+            .onChange(of: chromeState.searchIsPresented) { _, isPresented in
+                searchFieldIsFocused = isPresented
+                if !isPresented {
+                    searchController.query = ""
+                }
+            }
     }
 
     @ViewBuilder
@@ -148,8 +147,8 @@ struct ContentView: View {
         if let document = documentManager.document {
             PDFKitPageView(
                 document: document,
-                topContentInset: chromeState.titleBarHeight,
-                annotations: documentManager.annotations,
+                topContentInset: chromeState.titleBarHeight + (chromeState.searchIsPresented ? 40 : 0),
+                annotationsByPage: documentManager.annotationsByPage,
                 focusedAnnotation: documentManager.focusedAnnotation,
                 annotationNavigationID: documentManager.annotationNavigationID,
                 annotationPresentationRequest: documentManager.annotationPresentationRequest,
@@ -161,6 +160,7 @@ struct ContentView: View {
                     documentManager.deselectAnnotation()
                 },
                 searchResults: searchController.results,
+                searchResultsRevision: searchController.resultsRevision,
                 currentSearchResultIndex: searchController.currentResultIndex,
                 searchNavigationID: searchController.navigationID,
                 zoomAction: documentManager.zoomAction,
@@ -196,30 +196,94 @@ struct ContentView: View {
                 },
                 selectedPageIndex: $documentManager.selectedPageIndex
             )
-            .background(Color(nsColor: .windowBackgroundColor))
-            .safeAreaInset(edge: .bottom, spacing: 0) {
+            .background(Color(nsColor: .underPageBackgroundColor))
+            .overlay(alignment: .top) {
+                if !chromeState.searchIsPresented {
+                    LinearGradient(
+                        colors: [
+                            Color(nsColor: .underPageBackgroundColor),
+                            Color(nsColor: .underPageBackgroundColor).opacity(0),
+                        ],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                    .frame(height: 18)
+                    .allowsHitTesting(false)
+                }
+            }
+            .overlay(alignment: .top) {
                 if chromeState.searchIsPresented {
                     searchBar
+                        .padding(.top, chromeState.titleBarHeight)
                 }
             }
         } else {
-            Color(nsColor: .textBackgroundColor)
-                .ignoresSafeArea()
+            ContentUnavailableView {
+                Label("No PDF Open", systemImage: "doc.richtext")
+            } description: {
+                Text("Open a PDF document to read and review annotations.")
+            } actions: {
+                Button("Open PDF…") {
+                    documentManager.requestOpenPanel()
+                }
+                .buttonStyle(.borderedProminent)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Color(nsColor: .textBackgroundColor))
+            .ignoresSafeArea()
         }
     }
 
     private var searchBar: some View {
         HStack(spacing: 8) {
-            TextField("Search PDF", text: $searchController.query)
-                .textFieldStyle(.roundedBorder)
-                .focused($searchFieldIsFocused)
-                .onSubmit {
-                    documentManager.performSearch()
+            HStack(spacing: 6) {
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+
+                TextField("Search PDF", text: $searchController.query)
+                    .textFieldStyle(.plain)
+                    .focused($searchFieldIsFocused)
+                    .onSubmit {
+                        if !searchController.results.isEmpty && !searchController.isSearching {
+                            documentManager.selectNextSearchResult()
+                        } else {
+                            documentManager.performSearchAsync()
+                        }
+                    }
+                    .onExitCommand {
+                        chromeState.searchIsPresented = false
+                    }
+
+                if !searchController.query.isEmpty {
+                    Button {
+                        searchController.query = ""
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Clear search")
+                    .help("Clear search")
                 }
-                .onExitCommand {
-                    chromeState.searchIsPresented = false
-                }
-                .frame(minWidth: 180, idealWidth: 260, maxWidth: 360)
+            }
+            .padding(.horizontal, 8)
+            .frame(height: 26)
+            .background(
+                Color(nsColor: .textBackgroundColor),
+                in: RoundedRectangle(cornerRadius: 6, style: .continuous)
+            )
+            .overlay {
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
+            }
+            .frame(minWidth: 180, idealWidth: 260, maxWidth: 360)
+
+            if searchController.isSearching {
+                ProgressView()
+                    .controlSize(.mini)
+            }
 
             Text(searchController.resultSummary)
                 .monospacedDigit()
@@ -233,6 +297,7 @@ struct ContentView: View {
             }
             .labelStyle(.iconOnly)
             .disabled(searchController.results.isEmpty)
+            .help("Previous Result (⇧⌘G)")
 
             Button {
                 documentManager.selectNextSearchResult()
@@ -241,6 +306,9 @@ struct ContentView: View {
             }
             .labelStyle(.iconOnly)
             .disabled(searchController.results.isEmpty)
+            .help("Next Result (⌘G)")
+
+            Spacer(minLength: 0)
 
             Button {
                 chromeState.searchIsPresented = false
@@ -248,15 +316,21 @@ struct ContentView: View {
                 Label("Close Search", systemImage: "xmark")
             }
             .labelStyle(.iconOnly)
-
-            Spacer(minLength: 0)
+            .help("Close Search (Esc)")
         }
         .controlSize(.small)
         .padding(.horizontal, 10)
-        .padding(.vertical, 6)
+        .frame(height: 40)
         .background(.bar)
-        .overlay(alignment: .top) {
+        .overlay(alignment: .bottom) {
             Divider()
+        }
+        .task(id: searchController.query) {
+            let trimmed = searchController.query.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return }
+            try? await Task.sleep(for: .milliseconds(180))
+            guard !Task.isCancelled else { return }
+            documentManager.performSearchAsync()
         }
     }
 }
@@ -281,6 +355,65 @@ extension AnnotationTool {
         case .strikeout: "strikethrough"
         case .note: "message-square-text"
         case .insertText: "text-cursor-input"
+        }
+    }
+
+    var opticalIconSize: CGFloat {
+        switch self {
+        case .selection, .underline, .strikeout: 15
+        case .highlight, .note, .insertText: 16
+        }
+    }
+
+    var annotationKind: Annotation.Kind? {
+        switch self {
+        case .selection: nil
+        case .highlight: .highlight
+        case .underline: .underline
+        case .strikeout: .strikeout
+        case .note: .note
+        case .insertText: .caret
+        }
+    }
+}
+
+private struct AnnotationToolControlView: View {
+    @ObservedObject var chromeState: ReaderChromeState
+
+    var body: some View {
+        Group {
+            if #available(macOS 27.0, *) {
+                annotationToolPicker
+                    .pickerStyle(.tabs)
+                    .labelStyle(.iconOnly)
+                    .fixedSize()
+                    .padding(.horizontal, 3)
+                    .padding(.vertical, 2)
+                    .glassEffect(.regular, in: Capsule())
+            } else {
+                annotationToolPicker
+                    .pickerStyle(.segmented)
+                    .labelStyle(.iconOnly)
+                    .fixedSize()
+            }
+        }
+    }
+
+    private var annotationToolPicker: some View {
+        Picker("Annotation Tool", selection: $chromeState.annotationTool.animation()) {
+            ForEach(AnnotationTool.allCases, id: \.self) { tool in
+                let size = tool.opticalIconSize
+                Label {
+                    Text(tool.label)
+                } icon: {
+                    Image(tool.iconName, bundle: .module)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(width: size, height: size)
+                }
+                .tag(tool)
+                .help(tool.label)
+            }
         }
     }
 }

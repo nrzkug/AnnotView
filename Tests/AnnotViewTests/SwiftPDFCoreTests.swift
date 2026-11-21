@@ -892,4 +892,165 @@ struct SwiftPDFCoreTests {
         #expect(swiftAnnots[0].statusTargetSourceID == "4 0 R")
         #expect(swiftAnnots[0].bounds == CGRect(x: 100, y: 682, width: 100, height: 18))
     }
+
+    @Test @MainActor
+    func displayDocumentPreparerPreservesLinksWhileStrippingOtherAnnotations() async throws {
+        let dir = try makeTempDir("SwiftPDFPreserveLinks")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appendingPathComponent("links.pdf")
+
+        let image = NSImage(size: NSSize(width: 400, height: 400))
+        image.lockFocus()
+        NSColor.white.setFill()
+        NSRect(origin: .zero, size: image.size).fill()
+        image.unlockFocus()
+        let page = try #require(PDFPage(image: image))
+
+        let link = PDFAnnotation(bounds: CGRect(x: 20, y: 300, width: 80, height: 20), forType: .link, withProperties: nil)
+        let highlight = PDFAnnotation(bounds: CGRect(x: 20, y: 200, width: 80, height: 20), forType: .highlight, withProperties: nil)
+        let note = PDFAnnotation(bounds: CGRect(x: 20, y: 100, width: 20, height: 20), forType: .text, withProperties: nil)
+        page.addAnnotation(link)
+        page.addAnnotation(highlight)
+        page.addAnnotation(note)
+
+        let document = PDFDocument()
+        document.insert(page, at: 0)
+        #expect(document.write(to: url))
+
+        let strippedData = try await SwiftPDFDisplayDocumentPreparer(storeCache: PDFDocumentStoreCache()).displayData(for: url)
+        let strippedDoc = try #require(PDFDocument(data: strippedData))
+        let strippedAnnotations = strippedDoc.page(at: 0)?.annotations ?? []
+        #expect(strippedAnnotations.count == 1)
+        #expect(strippedAnnotations.first?.type == "Link")
+    }
+
+    @Test @MainActor
+    func documentStoreCacheReusesCachedStoreAndInvalidatesOnExternalModification() async throws {
+        let dir = try makeTempDir("SwiftPDFStoreCache")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appendingPathComponent("cached.pdf")
+        try writeBlankPDF(to: url)
+
+        let cache = PDFDocumentStoreCache()
+        let first = try await cache.store(for: url)
+        let second = try await cache.store(for: url)
+        #expect(first === second)
+
+        // Write via an independent cache/writer to simulate an external file replacement.
+        let externalWriter = SwiftPDFAnnotationWriter(storeCache: PDFDocumentStoreCache())
+        try await externalWriter.createNote(
+            in: url,
+            location: PDFPagePoint(pageIndex: 0, point: CGPoint(x: 100, y: 200)),
+            contents: "External update",
+            author: "External",
+            color: .yellow,
+            createdAt: Date()
+        )
+
+        let third = try await cache.store(for: url)
+        #expect(third !== first)
+        let parsed = SwiftPDFAnnotationParser(storeCache: cache).parseAnnotations(in: third)
+        #expect(parsed.count == 1)
+        #expect(parsed.first?.contents == "External update")
+    }
+
+    @Test @MainActor
+    func textOnlyAnnotationUpdateReusesExistingAppearanceStream() async throws {
+        let dir = try makeTempDir("SwiftPDFReuseAP")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appendingPathComponent("reuse-ap.pdf")
+        try writeBlankPDF(to: url)
+
+        let cache = PDFDocumentStoreCache()
+        let writer = SwiftPDFAnnotationWriter(storeCache: cache)
+        let parser = SwiftPDFAnnotationParser(storeCache: cache)
+        let initialColor = Annotation.Color(red: 0.25, green: 0.5, blue: 0.75, alpha: 0.8)
+
+        try await writer.createNote(
+            in: url,
+            location: PDFPagePoint(pageIndex: 0, point: CGPoint(x: 120, y: 240)),
+            contents: "Initial",
+            author: "Reviewer",
+            color: initialColor,
+            createdAt: Date()
+        )
+
+        let created = try #require(try await parser.annotations(in: url).first)
+        let sourceID = try #require(created.sourceID)
+        let objNum = try #require(SwiftPDFAnnotationWriter.parseObjectNumber(from: sourceID))
+
+        let initialStore = try PDFDocumentStore(url: url)
+        let initialAP = initialStore.object(number: objNum)?.dictValue?["AP"]?.dictValue?["N"]
+        #expect(initialAP?.indirectRefValue != nil)
+
+        // Updating contents with matching color & opacity should reuse the existing /AP /N stream.
+        try await writer.update(
+            in: url,
+            sourceID: sourceID,
+            contents: "Updated comment text",
+            author: "Reviewer",
+            color: created.color,
+            modifiedAt: Date()
+        )
+
+        let afterTextStore = try PDFDocumentStore(url: url)
+        let afterTextDict = try #require(afterTextStore.object(number: objNum)?.dictValue)
+        let afterTextAP = afterTextDict["AP"]?.dictValue?["N"]
+        #expect(afterTextAP == initialAP)
+        #expect(afterTextDict["Contents"]?.textString == "Updated comment text")
+
+        // Changing color should regenerate /AP /N.
+        try await writer.update(
+            in: url,
+            sourceID: sourceID,
+            contents: "Updated color text",
+            author: "Reviewer",
+            color: Annotation.Color(red: 0.9, green: 0.1, blue: 0.2, alpha: 0.8),
+            modifiedAt: Date()
+        )
+
+        let afterColorStore = try PDFDocumentStore(url: url)
+        let afterColorAP = afterColorStore.object(number: objNum)?.dictValue?["AP"]?.dictValue?["N"]
+        #expect(afterColorAP?.indirectRefValue != nil)
+        #expect(afterColorAP != initialAP)
+    }
+
+    @Test @MainActor
+    func incrementalSuffixMatchesBuildDataAndSavesViaClone() async throws {
+        let dir = try makeTempDir("SwiftPDFIncrementalClone")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appendingPathComponent("clone.pdf")
+        try writeBlankPDF(to: url)
+
+        let store = try PDFDocumentStore(url: url)
+        let page = try #require(store.pages().first)
+        let writer = PDFIncrementalWriter(store: store)
+        let annotRef = writer.allocateObject(.dict([
+            "Type": .name("Annot"),
+            "Subtype": .name("Text"),
+            "Rect": .array([.real(40), .real(40), .real(60), .real(60)]),
+            "P": .indirectRef(objNum: page.pageObjNum, genNum: page.pageGenNum),
+            "Contents": .string(PDFTextString.encode("Cloned save note")),
+            "T": .string(PDFTextString.encode("Tester"))
+        ]))
+        writer.appendAnnot(annotRef, to: page)
+
+        let suffix = writer.buildIncrementalSuffix()
+        let fullData = writer.buildData()
+        #expect(!suffix.isEmpty)
+        #expect(store.rawData + suffix == fullData)
+
+        let writtenSuffix = try writer.saveIncrementally(to: url)
+        #expect(writtenSuffix == suffix)
+
+        let diskData = try Data(contentsOf: url)
+        #expect(diskData == fullData)
+
+        let parsed = try await SwiftPDFAnnotationParser(storeCache: PDFDocumentStoreCache()).annotations(in: url)
+        #expect(parsed.count == 1)
+        #expect(parsed.first?.contents == "Cloned save note")
+
+        let pdfKitDoc = try #require(PDFDocument(url: url))
+        #expect(pdfKitDoc.page(at: 0)?.annotations.count == 1)
+    }
 }

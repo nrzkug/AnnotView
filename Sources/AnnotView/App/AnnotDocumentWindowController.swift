@@ -3,8 +3,8 @@ import Combine
 import SwiftUI
 
 private struct AnnotViewDocumentRootView: View {
-    @ObservedObject var documentManager: PDFDocumentManager
-    @ObservedObject var chromeState: ReaderChromeState
+    let documentManager: PDFDocumentManager
+    let chromeState: ReaderChromeState
     @ObservedObject var appearanceSettings: AppearanceSettings
 
     var body: some View {
@@ -13,7 +13,7 @@ private struct AnnotViewDocumentRootView: View {
             .environmentObject(chromeState)
             .environmentObject(documentManager.searchController)
             .preferredColorScheme(appearanceSettings.appearance.colorScheme)
-            .frame(minWidth: 720, minHeight: 480)
+            .frame(minWidth: 720, minHeight: 500)
     }
 }
 
@@ -44,7 +44,7 @@ final class AnnotDocumentWindowController: NSWindowController, NSWindowDelegate 
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
         window.titlebarSeparatorStyle = .none
-        window.minSize = NSSize(width: 1_000, height: 620)
+        window.minSize = NSSize(width: 720, height: 500)
         window.tabbingMode = .disallowed
         window.isReleasedWhenClosed = false
         window.contentViewController = hostingController

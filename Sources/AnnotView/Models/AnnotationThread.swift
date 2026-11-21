@@ -1,6 +1,6 @@
 import Foundation
 
-struct AnnotationThread: Identifiable {
+struct AnnotationThread: Identifiable, Equatable {
     var id: UUID { root.id }
     let root: Annotation
     let replies: [Annotation]

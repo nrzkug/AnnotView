@@ -57,6 +57,130 @@ struct AnnotationPopoverTests {
         #expect(dismissed)
     }
 
+    @Test
+    func dismissingPopoverWithModifiedDraftAutoSaves() async throws {
+        var savedValues: [String] = []
+        let coordinator = AnnotationPopoverCoordinator(hostView: AnnotationPDFView(frame: .zero))
+        let result = try await runCoordinatorPopover(
+            initialContents: "",
+            coordinator: coordinator,
+            onSave: { value in
+                savedValues.append(value)
+                return true
+            },
+            action: { textView, popover, _ in
+                textView.string = "  Auto saved note  "
+                textView.didChangeText()
+                popover.close()
+            }
+        )
+        #expect(result == nil)
+        #expect(savedValues == ["Auto saved note"])
+    }
+
+    @Test
+    func cancelingModifiedDraftDoesNotAutoSave() async throws {
+        var savedValues: [String] = []
+        let coordinator = AnnotationPopoverCoordinator(hostView: AnnotationPDFView(frame: .zero))
+        let pendingAfterCancel = try await runCoordinatorPopover(
+            initialContents: "Initial",
+            coordinator: coordinator,
+            onSave: { value in
+                savedValues.append(value)
+                return true
+            },
+            action: { textView, popover, model in
+                textView.string = "Unsaved edit"
+                textView.didChangeText()
+                textView.cancelOperation(nil)
+                #expect(model.pendingEdit == nil)
+                popover.close()
+            }
+        )
+        #expect(pendingAfterCancel == nil)
+        #expect(savedValues.isEmpty)
+    }
+
+    @Test
+    func dismissingUnmodifiedEditorDoesNotAutoSave() async throws {
+        var savedValues: [String] = []
+        let coordinator = AnnotationPopoverCoordinator(hostView: AnnotationPDFView(frame: .zero))
+        let pending = try await runCoordinatorPopover(
+            initialContents: "",
+            coordinator: coordinator,
+            onSave: { value in
+                savedValues.append(value)
+                return true
+            },
+            action: { _, popover, model in
+                #expect(model.pendingEdit == nil)
+                popover.close()
+            }
+        )
+        #expect(pending == nil)
+        #expect(savedValues.isEmpty)
+    }
+
+    private func runCoordinatorPopover(
+        initialContents: String,
+        coordinator: AnnotationPopoverCoordinator,
+        onSave: @escaping @MainActor (String) async -> Bool,
+        action: @MainActor (NSTextView, NSPopover, AnnotationPreviewModel) -> Void
+    ) async throws -> String? {
+        let annotation = Annotation(
+            kind: .highlight,
+            pageIndex: 0,
+            bounds: CGRect(x: 100, y: 100, width: 120, height: 16),
+            contents: initialContents,
+            author: "Reviewer"
+        )
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 700, height: 700),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        window.isReleasedWhenClosed = false
+        let anchorView = NSView(frame: NSRect(x: 50, y: 350, width: 20, height: 20))
+        window.contentView?.addSubview(anchorView)
+        window.makeKeyAndOrderFront(nil)
+        defer { window.close() }
+
+        let popover = NSPopover()
+        popover.behavior = .semitransient
+        popover.animates = false
+        popover.delegate = coordinator
+        popover.contentSize = NSSize(
+            width: AnnotationPopoverView.width,
+            height: AnnotationPopoverView.preferredHeight(for: initialContents)
+        )
+
+        let config = AnnotationPreviewConfiguration(
+            annotation: annotation,
+            startEditing: true,
+            onSave: onSave,
+            onUpdateStatus: { _ in true },
+            onHeightChange: { _ in },
+            onPin: {},
+            onStatusMenuTracking: { _ in },
+            onDismiss: { popover.close() }
+        )
+        let model = AnnotationPreviewModel(configuration: config)
+        let controller = NSHostingController(
+            rootView: AnnotationPreviewSwapView(model: model)
+        )
+        popover.contentViewController = controller
+        popover.show(relativeTo: anchorView.bounds, of: anchorView, preferredEdge: .maxX)
+        defer { popover.close() }
+
+        try await Task.sleep(for: .milliseconds(100))
+        let textView = try #require(firstTextView(in: controller.view))
+        action(textView, popover, model)
+        try await Task.sleep(for: .milliseconds(120))
+        return model.pendingEdit?.contents
+    }
+
     private func runEditorAction(
         initialContents: String,
         action: @MainActor (NSTextView) -> Void

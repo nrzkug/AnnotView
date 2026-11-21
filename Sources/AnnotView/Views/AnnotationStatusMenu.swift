@@ -1,8 +1,7 @@
 import AppKit
 import SwiftUI
 
-/// Shared native status menu: Lucide icon, title, and the check at the trailing
-/// edge instead of the system's leading state check. No counts.
+/// Shared native status menu with Lucide icons and standard leading state checkmarks.
 final class AnnotationStatusMenuTarget: NSObject {
     var onSelect: ((Annotation.Status?) -> Void)?
 
@@ -27,8 +26,6 @@ struct MenuAnchorView: NSViewRepresentable {
 
 @MainActor
 enum AnnotationStatusMenu {
-    private static let tabLocation: CGFloat = 126
-
     static func make(
         selection: Annotation.Status?,
         includeAll: Bool,
@@ -39,7 +36,7 @@ enum AnnotationStatusMenu {
 
         if includeAll {
             menu.addItem(item(
-                title: "All statuses",
+                title: "All Statuses",
                 icon: nil,
                 tint: .secondaryLabelColor,
                 checked: selection == nil,
@@ -79,35 +76,11 @@ enum AnnotationStatusMenu {
         )
         item.target = target
         item.representedObject = represented
-        item.attributedTitle = attributedTitle(title, checked: checked)
+        item.state = checked ? .on : .off
         if let icon, let image = tintedIcon(icon, tint: tint) {
             item.image = image
         }
         return item
-    }
-
-    private static func attributedTitle(_ title: String, checked: Bool) -> NSAttributedString {
-        let paragraph = NSMutableParagraphStyle()
-        paragraph.tabStops = [NSTextTab(textAlignment: .right, location: tabLocation)]
-
-        let result = NSMutableAttributedString(
-            string: title,
-            attributes: [
-                .font: NSFont.menuFont(ofSize: 0),
-                .foregroundColor: NSColor.labelColor,
-                .paragraphStyle: paragraph,
-            ]
-        )
-        guard checked else { return result }
-        result.append(NSAttributedString(
-            string: "\t✓",
-            attributes: [
-                .font: NSFont.systemFont(ofSize: 12, weight: .semibold),
-                .foregroundColor: NSColor.controlAccentColor,
-                .paragraphStyle: paragraph,
-            ]
-        ))
-        return result
     }
 
     private static func tintedIcon(_ name: String, tint: NSColor) -> NSImage? {
